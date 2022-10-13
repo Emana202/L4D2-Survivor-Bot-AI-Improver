@@ -1,5 +1,5 @@
-#pragma semicolon 1
 #pragma newdecls required
+#pragma semicolon 1
 
 #include <sourcemod>
 #include <sdktools>
@@ -1862,7 +1862,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[5])
 					)
 					{
 						float fLeaderDist = (IsValidClient(iTeamLeader) ? GetClientTravelDistance(iTeamLeader, fMovePos) : -2.0);
-						if (fLeaderDist == -2.0 || fLeaderDist != -1.0 && fLeaderDist <= (g_fCvar_ImprovedMelee_ApproachRange * 0.8))
+						if (fLeaderDist == -2.0 || fLeaderDist != -1.0 && fLeaderDist <= (g_fCvar_ImprovedMelee_ApproachRange * 0.9))
 						{
 							float fTravelDist = GetVectorTravelDistance(fMovePos, g_fClientAbsOrigin[iClient]);
 							if (fTravelDist != -1.0 && fTravelDist <= g_fCvar_ImprovedMelee_ApproachRange)
@@ -5162,80 +5162,55 @@ void CheckEntityForVisibility(int iClient, int iEntity, float fOverridePos[3], i
 
 int GetClosestInfected(int iClient, float fDistance = -1.0)
 {
-	int iInfected = -1;
-	float fInfectedPos[3];
+	int iCloseInfected = -1;
+	float fInfectedPos[3], fInfectedDist, fLastDist = -1.0;
 
-	float fInfectedDist;
-	float fLastDist = -1.0;
-	bool bIsGoingForSomething = false;
-	
-	int ci = INVALID_ENT_REFERENCE;
-	int iChaseEnt = INVALID_ENT_REFERENCE;
-	while ((ci = FindEntityByClassname(ci, "infected")) != INVALID_ENT_REFERENCE)
+	bool bIsChasingSomething = false;
+	int iThrownPipeBomb = (FindEntityByClassname(-1, "pipe_bomb_projectile"));
+	bool bBileWasThrown = (FindEntityByClassname(-1, "info_goal_infected_chase") != -1);
+
+	int iInfected = INVALID_ENT_REFERENCE;
+	while ((iInfected = FindEntityByClassname(iInfected, "infected")) != INVALID_ENT_REFERENCE)
 	{
-		if (!IsCommonInfectedAlive(ci))
+		if (!IsCommonInfectedAlive(iInfected))
 			continue;
 
-		GetEntityCenteroid(ci, fInfectedPos);
+		GetEntityCenteroid(iInfected, fInfectedPos);
 		fInfectedDist = GetVectorDistance(g_fClientCenteroid[iClient], fInfectedPos);
 		if (fLastDist != -1.0 && fInfectedDist >= fLastDist || fDistance > 0.0 && fInfectedDist > fDistance || !IsVisibleVector(iClient, fInfectedPos))
 			continue;
 
-		bIsGoingForSomething = false;
-		if (fInfectedDist > 160.0)
-		{
-			while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "pipe_bomb_projectile")) != INVALID_ENT_REFERENCE)
-			{
-				if (GetEntityDistance(iChaseEnt, ci) > 256.0)continue;
-				bIsGoingForSomething = true;
-				break;
-			}
-			if (!bIsGoingForSomething)
-			{
-				iChaseEnt = INVALID_ENT_REFERENCE;
-				while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "info_goal_infected_chase")) != INVALID_ENT_REFERENCE)
-				{
-					bIsGoingForSomething = true;
-					break;
-				}
-			}
-		}
-		if (!bIsGoingForSomething && fInfectedDist > 96.0)
+		bIsChasingSomething = (fInfectedDist > 160.0 && (bBileWasThrown || iThrownPipeBomb >= 0 && GetEntityDistance(iInfected, iThrownPipeBomb) <= 256.0));
+		if (!bIsChasingSomething && fInfectedDist > 96.0)
 		{
 			for (int i = 1; i <= MaxClients; i++)
 			{
-				if (iClient == i || !IsPlayerSurvivor(i))
-					continue;
-
-				if (g_iSurvivorBot_TargetInfected[i] == ci && IsWeaponSlotActive(i, 1) && IsEntityExists(g_iSurvivorBot_TargetInfected[i]) && SurvivorHasMeleeWeapon(i) != 0)
-				{
-					bIsGoingForSomething = true;
-					break;
-				}
+				bIsChasingSomething = (iClient != i && IsPlayerSurvivor(i) && g_iSurvivorBot_TargetInfected[i] == iInfected && IsWeaponSlotActive(i, 1) && IsEntityExists(g_iSurvivorBot_TargetInfected[i]) && SurvivorHasMeleeWeapon(i) != 0);
+				if (bIsChasingSomething)break;
 			}
 		}
-		if (bIsGoingForSomething != false)continue;
+		if (bIsChasingSomething)continue;
 
-		iInfected = ci;
+		iCloseInfected = iInfected;
 		fLastDist = fInfectedDist;
 	}
 
 	bool bIsAttacking;
-	for (int si = 1; si <= MaxClients; si++)
+	for (iInfected = 1; iInfected <= MaxClients; iInfected++)
 	{
-		if (!IsSpecialInfected(si) || bIsAttacking && !IsUsingSpecialAbility(si) || L4D2_GetPlayerZombieClass(si) == L4D2ZombieClass_Tank || !IsVisibleEntity(iClient, si, MASK_VISIBLE_AND_NPCS))
+		if (!IsSpecialInfected(iInfected) || bIsAttacking && !IsUsingSpecialAbility(iInfected) || L4D2_GetPlayerZombieClass(iInfected) == L4D2ZombieClass_Tank || !IsVisibleEntity(iClient, iInfected, MASK_VISIBLE_AND_NPCS))
 			continue;
 
-		fInfectedDist = GetClientDistance(iClient, si);
+		fInfectedDist = GetClientDistance(iClient, iInfected);
 		if (fDistance > 0.0 && fInfectedDist > fDistance || fLastDist != -1.0 && fInfectedDist >= fLastDist)
 			continue;
 
-		iInfected = si;
+		iCloseInfected = iInfected;
 		fLastDist = fInfectedDist;
-		bIsAttacking = IsUsingSpecialAbility(si);
+		bIsAttacking = IsUsingSpecialAbility(iInfected);
 	}
 
-	return iInfected;
+	return iCloseInfected;
 }
 
 /*int GetClosestSpecialInfected(int iClient, float fVisibleDist = -1.0, float fNotVisibleDist = -1.0, int iZombieClass = -1)
