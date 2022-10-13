@@ -3161,6 +3161,9 @@ void PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 {
 	if (g_bClient_IsFiringWeapon[iClient])
 		return;
+
+	int iWeapon = L4D_GetPlayerCurrentWeapon(iClient);
+	if (iWeapon == -1)return;
 	
 	if (IsFakeClient(iClient))
 	{	
@@ -3170,8 +3173,6 @@ void PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 		static ConVar cvarDontShoot; if (!cvarDontShoot)cvarDontShoot = FindConVar("sb_dont_shoot");
 		if (cvarDontShoot.BoolValue)return;
 	}
-
-	int iWeapon = L4D_GetPlayerCurrentWeapon(iClient);
 
 	char szClassname[64];
 	GetEdictClassname(iWeapon, szClassname, sizeof(szClassname));
@@ -3183,8 +3184,8 @@ void PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 		float fCycleTime = GetWeaponCycleTime(iWeapon);
 		float fAimPos[3]; GetClientAimPosition(iClient, fAimPos);
 
-		float fClampDist = 1792.0;
-		if (bIsPistol == 2)fClampDist = 960.0;
+		float fClampDist = 2048.0;
+		if (bIsPistol == 2)fClampDist *= 0.5;
 		else if (GetEntProp(iWeapon, Prop_Send, "m_upgradeBitVec") & L4D2_WEPUPGFLAG_LASER)fClampDist *= 2.0;
 
 		fNextFireT = (fCycleTime * (GetVectorDistance(g_fClientEyePos[iClient], fAimPos) / fClampDist));
