@@ -303,7 +303,7 @@ static int g_iWeapon_AmmoLeft[MAXENTITIES+1];
 // ----------------------------------------------------------------------------------------------------
 // MELEE WEAPON MODELS
 // ----------------------------------------------------------------------------------------------------
-static const char g_szMeleePriotityList_2[][] =
+static const char g_szMeleeWeaponMdls[][] =
 {
 	"models/weapons/melee/w_katana.mdl",
 	"models/weapons/melee/w_fireaxe.mdl",
@@ -4407,9 +4407,9 @@ bool GetWeaponClassname(int iWeapon, char[] sBuffer, int iMaxLength)
 		FormatEx(sBuffer, iMaxLength, "weapon_chainsaw");
 	else
 	{
-		for (int i = 0; i < sizeof(g_szMeleePriotityList_2); i++)
+		for (int i = 0; i < sizeof(g_szMeleeWeaponMdls); i++)
 		{
-			if (strcmp(szWeaponModel, g_szMeleePriotityList_2[i], false) == 0)
+			if (strcmp(szWeaponModel, g_szMeleeWeaponMdls[i], false) == 0)
 			{
 				FormatEx(sBuffer, iMaxLength, "weapon_melee");
 				break;
