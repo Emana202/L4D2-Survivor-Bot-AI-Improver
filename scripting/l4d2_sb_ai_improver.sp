@@ -190,6 +190,9 @@ static float g_fCvar_NextProcessTime;
 static ConVar g_hCvar_BotsFieldOfView;
 static float g_fCvar_BotsFieldOfView;
 
+static ConVar g_hCvar_SpitterAcidEvasion;
+static bool g_bCvar_SpitterAcidEvasion;
+
 /*============ VARIABLES =========================================================*/
 static float g_fSurvivorBot_NextPressAttackTime[MAXPLAYERS+1];
 
@@ -548,6 +551,8 @@ void CreateAndHookConVars()
 	
 	g_hCvar_BotsFieldOfView 						= CreateConVar("l4d2_improvedbots_bots_fov", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
 	
+	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
 	g_hCvar_NextProcessTime 						= CreateConVar("l4d2_improvedbots_process_time", "0.15", "Delay required for bots to process heavy computings on CPU ('for', 'while' loops, etc.).", FCVAR_NOTIFY, true, 0.033);
 
 	g_hCvar_GameDifficulty.AddChangeHook(OnConVarChanged);
@@ -622,6 +627,8 @@ void CreateAndHookConVars()
 	g_hCvar_MaxWeaponTier3_GLauncher.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_BotsFieldOfView.AddChangeHook(OnConVarChanged);
+	
+	g_hCvar_SpitterAcidEvasion.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_NextProcessTime.AddChangeHook(OnConVarChanged);
 }
@@ -715,6 +722,8 @@ void UpdateConVarValues()
 	g_iCvar_MaxWeaponTier3_GLauncher 					= g_hCvar_MaxWeaponTier3_GLauncher.IntValue;
 	
 	g_fCvar_BotsFieldOfView 							= g_hCvar_BotsFieldOfView.FloatValue;
+
+	g_bCvar_SpitterAcidEvasion							= g_hCvar_SpitterAcidEvasion.BoolValue;
 	
 	g_fCvar_NextProcessTime 							= g_hCvar_NextProcessTime.FloatValue;
 }
@@ -2320,7 +2329,7 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 		return Plugin_Changed; 
 	}
 
-	if (!IsEntityExists(iInflictor) || strcmp(g_szSurvivorBot_MovePos_Desc[iClient], "EscapeInferno") == 0)
+	if (!g_bCvar_SpitterAcidEvasion || !IsEntityExists(iInflictor) || strcmp(g_szSurvivorBot_MovePos_Desc[iClient], "EscapeInferno") == 0)
 		return Plugin_Continue; 
 
 	char szInfClass[16]; GetEntityClassname(iInflictor, szInfClass, sizeof(szInfClass));
