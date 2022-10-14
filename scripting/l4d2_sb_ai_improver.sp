@@ -2060,30 +2060,27 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 				g_fSurvivorBot_Grenade_ThrowPos[iClient] = fThrowPosition;
 
-				if (g_iSurvivorBot_ThreatInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.33))
+				if (g_iSurvivorBot_ThreatInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.33)) && CheckIsUnableToThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
 				{
-					if (CheckIsUnableToThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
-					{
-						g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-						SwitchWeaponSlot(iClient, ((GetClientPrimaryAmmo(iClient) > 0) ? 0 : 1));
+					g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
+					SwitchWeaponSlot(iClient, ((GetClientPrimaryAmmo(iClient) > 0) ? 0 : 1));
 
-						if (iGrenadeType == 2)
-						{
-							if (GetGameTime() > g_fSurvivorBot_Grenade_NextThrowTime_Molotov)
-							{
-								g_fSurvivorBot_Grenade_NextThrowTime_Molotov = GetGameTime() + GetRandomFloat(0.75, 1.5);
-							}
-						}
-						else if (GetGameTime() > g_fSurvivorBot_Grenade_NextThrowTime)
-						{
-							g_fSurvivorBot_Grenade_NextThrowTime = GetGameTime() + GetRandomFloat(0.75, 1.5);
-						}
-					}
-					else
+					if (iGrenadeType == 2)
 					{
-						SnapViewToPosition(iClient, g_fSurvivorBot_Grenade_AimPos[iClient]);
-						PressAttackButton(iClient, iButtons);
+						if (GetGameTime() > g_fSurvivorBot_Grenade_NextThrowTime_Molotov)
+						{
+							g_fSurvivorBot_Grenade_NextThrowTime_Molotov = GetGameTime() + GetRandomFloat(0.75, 1.5);
+						}
 					}
+					else if (GetGameTime() > g_fSurvivorBot_Grenade_NextThrowTime)
+					{
+						g_fSurvivorBot_Grenade_NextThrowTime = GetGameTime() + GetRandomFloat(0.75, 1.5);
+					}
+				}
+				else
+				{
+					SnapViewToPosition(iClient, g_fSurvivorBot_Grenade_AimPos[iClient]);
+					PressAttackButton(iClient, iButtons);
 				}
 			}
 			else if (CheckCanThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
