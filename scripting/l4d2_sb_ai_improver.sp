@@ -204,6 +204,8 @@ static bool g_bCvar_SpitterAcidEvasion;
 static ConVar g_hCvar_AlwaysCarryProp;
 static bool g_bCvar_AlwaysCarryProp;
 
+static ConVar g_hCvar_KeepMovingInCombat;
+
 /*============ VARIABLES =========================================================*/
 static float g_fSurvivorBot_NextPressAttackTime[MAXPLAYERS+1];
 
@@ -417,6 +419,8 @@ public Plugin myinfo =
 }
 
 static bool g_bLateLoad;
+static bool g_bExtensionActions;
+
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	EngineVersion test = GetEngineVersion();
@@ -470,7 +474,12 @@ public void OnPluginStart()
 	AutoExecConfig(true, "l4d2_improved_bots");
 
 	// ----------------------------------------------------------------------------------------------------
-	// LATE LOAD CHECK
+	// TIMERS
+	// ----------------------------------------------------------------------------------------------------	
+	g_hScanMapForEntitiesTimer = CreateTimer(MAP_SCAN_TIMER_INTERVAL, ScanMapForEntities, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+
+	// ----------------------------------------------------------------------------------------------------
+	// MISC
 	// ----------------------------------------------------------------------------------------------------	
 	if (g_bLateLoad)
 	{
@@ -481,10 +490,7 @@ public void OnPluginStart()
 		}
 	}
 
-	// ----------------------------------------------------------------------------------------------------
-	// TIMERS
-	// ----------------------------------------------------------------------------------------------------	
-	g_hScanMapForEntitiesTimer = CreateTimer(MAP_SCAN_TIMER_INTERVAL, ScanMapForEntities, _, TIMER_REPEAT|TIMER_FLAG_NO_MAPCHANGE);
+	g_bExtensionActions = LibraryExists("actionslib");
 }
 
 void CreateAndHookConVars()
@@ -564,6 +570,7 @@ void CreateAndHookConVars()
 	
 	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "0", "If survivor bot shouldn't drop his currently carrying prop no matter what.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_KeepMovingInCombat						= CreateConVar("l4d2_improvedbots_keepmovingincombat", "1", "If bots shouldn't stop when shooting infected when there's no human players in team.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("l4d2_improvedbots_witchbehavior_walkwhennearby", "500", "Survivor bots will start walking near witch if they're this value near her. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun. <0: Disabled; 1: Only if survivor team doesn't have any human players left; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
@@ -645,6 +652,7 @@ void CreateAndHookConVars()
 	
 	g_hCvar_SpitterAcidEvasion.AddChangeHook(OnConVarChanged);
 	g_hCvar_AlwaysCarryProp.AddChangeHook(OnConVarChanged);
+	g_hCvar_KeepMovingInCombat.AddChangeHook(OnConVarChanged);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby.AddChangeHook(OnConVarChanged);
 	g_hCvar_WitchBehavior_AllowCrowning.AddChangeHook(OnConVarChanged);
@@ -744,6 +752,9 @@ void UpdateConVarValues()
 
 	g_bCvar_SpitterAcidEvasion							= g_hCvar_SpitterAcidEvasion.BoolValue;
 	g_bCvar_AlwaysCarryProp								= g_hCvar_AlwaysCarryProp.BoolValue;
+	
+	char szShouldHurryCode[64]; FormatEx(szShouldHurryCode, sizeof(szShouldHurryCode), "DirectorScript.GetDirectorOptions().cm_ShouldHurry <- %i;", g_hCvar_KeepMovingInCombat.IntValue);
+	L4D2_ExecVScriptCode(szShouldHurryCode);
 
 	g_fCvar_WitchBehavior_WalkWhenNearby 				= g_hCvar_WitchBehavior_WalkWhenNearby.FloatValue;
 	g_iCvar_WitchBehavior_AllowCrowning 				= g_hCvar_WitchBehavior_AllowCrowning.IntValue;
@@ -1786,14 +1797,14 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		{
 			float fWitchRage = ((GetEntPropFloat(iWitchTarget, Prop_Send, "m_rage") + GetEntPropFloat(iWitchTarget, Prop_Send, "m_wanderrage")) / 2);
 			float fWalkDist = g_fCvar_WitchBehavior_WalkWhenNearby;
-			if (fWalkDist != 0.0 && fWitchRage <= 0.5 && GetEntityDistance(iClient, iWitchTarget, true) <= (fWalkDist*fWalkDist) && !LBI_IsSurvivorInCombat(iClient))
+			if (fWalkDist != 0.0 && fWitchRage <= 0.5 && GetVectorDistance(g_fClientAbsOrigin[iClient], fWitchOrigin, true) <= (fWalkDist*fWalkDist) && !LBI_IsSurvivorInCombat(iClient))
 			{
 				iButtons |= IN_SPEED;
 			}
 
 			int iHasShotgun = SurvivorHasShotgun(iClient);
 			int iCrowning = g_iCvar_WitchBehavior_AllowCrowning;
-			if ((iCrowning == 2 || iCrowning == 1 && !bTeamHasHumanPlayer) && !L4D_IsPlayerOnThirdStrike(iClient) && iCurWeapon == iWpnSlots[0] && LBI_IsSurvivorBotAvailable(iClient) && (!IsValidClient(iTeamLeader) || GetEntityDistance(iTeamLeader, iWitchTarget, true) <= (512.0*512.0)) && !IsWeaponReloading(iCurWeapon, false) && iHasShotgun && IsVisibleEntity(iClient, iWitchTarget))
+			if ((iCrowning == 2 || iCrowning == 1 && !bTeamHasHumanPlayer) && !L4D_IsPlayerOnThirdStrike(iClient) && iCurWeapon == iWpnSlots[0] && GetVectorDistance(g_fClientAbsOrigin[iClient], fWitchOrigin, true) <= (1024.0*1024.0) && LBI_IsSurvivorBotAvailable(iClient) && (!IsValidClient(iTeamLeader) || GetVectorDistance(g_fClientAbsOrigin[iTeamLeader], fWitchOrigin, true) <= (512.0*512.0)) && !IsWeaponReloading(iCurWeapon, false) && iHasShotgun && IsVisibleEntity(iClient, iWitchTarget))
 			{
 				float fSafeDist = (256.0 * fWitchRage);
 				if (fSafeDist < 90.0)fSafeDist = 90.0;
@@ -1807,11 +1818,13 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				}
 				else
 				{
-					Address pArea = L4D2Direct_GetTerrorNavArea(fWitchOrigin);
-					if (pArea != Address_Null && L4D2Direct_GetTerrorNavAreaFlow(pArea) >= L4D2Direct_GetFlowDistance(iClient))
+					bool bApproachWitch = !ShouldUseFlowDistance();
+					if (!bApproachWitch)
 					{
-						SetMoveToPosition(iClient, fWitchOrigin, 2, "GoToWitch", 0.0, fSafeDist, true);
+						Address pArea = L4D2Direct_GetTerrorNavArea(fWitchOrigin);
+						bApproachWitch = (pArea != Address_Null && L4D2Direct_GetTerrorNavAreaFlow(pArea) >= L4D2Direct_GetFlowDistance(iClient));
 					}
+					if (bApproachWitch)SetMoveToPosition(iClient, fWitchOrigin, 2, "GoToWitch", 0.0, fSafeDist, true);
 				}
 			}
 			else
@@ -1857,7 +1870,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 					if (fMeleeDistance <= (g_fCvar_ImprovedMelee_AttackRange*g_fCvar_ImprovedMelee_AttackRange) && !g_bSurvivorBot_PreventFire[iClient] && (iGameDifficulty == 4 || (!IsSurvivorBusy(iClient) || g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iSurvivorBot_NearbyFriends[iClient]) / (iTeamCount - 1))))))
 					{
 						if (iMeleeType == 2)g_fSurvivorBot_ChainsawHoldTime[iClient] = GetGameTime() + GetRandomFloat(0.5, 0.75);
-						else iButtons |= ((iInfectedClass == L4D2ZombieClass_Charger || GetRandomInt(1, g_iCvar_ImprovedMelee_ShoveChance) != 1) ? IN_ATTACK : IN_ATTACK2);
+						else iButtons |= ((iInfectedClass == L4D2ZombieClass_Charger || GetRandomInt(1, g_iCvar_ImprovedMelee_ShoveChance) != 1 && (iInfectedClass == L4D2ZombieClass_NotInfected || !IsCommonInfectedStumbled(iInfectedTarget))) ? IN_ATTACK : IN_ATTACK2);
 					}
 
 					bool bStopApproaching = true;
@@ -1904,7 +1917,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 		if ((g_iCvar_AutoShove_Enabled == 1 || g_iCvar_AutoShove_Enabled == 2 && !FVectorInViewAngle(iClient, fInfectedPos)) && fInfectedDist <= (80.0*80.0) && !L4D_IsPlayerIncapacitated(iClient) && (!IsSurvivorBusy(iClient) || g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iSurvivorBot_NearbyFriends[iClient]) / (iTeamCount - 1)))) && (!SurvivorHasMeleeWeapon(iClient) || iCurWeapon != iWpnSlots[1]))
 		{
-			if (IsSurvivorCarryingProp(iClient) || (iInfectedClass == L4D2ZombieClass_NotInfected || iInfectedClass != L4D2ZombieClass_Charger && iInfectedClass != L4D2ZombieClass_Tank && !L4D_IsPlayerStaggering(iInfectedTarget) && !IsUsingSpecialAbility(iInfectedTarget)) && GetRandomInt(1, 4) == 1)
+			if (IsSurvivorCarryingProp(iClient) || (iInfectedClass == L4D2ZombieClass_NotInfected && !IsCommonInfectedStumbled(iInfectedTarget) || iInfectedClass != L4D2ZombieClass_Charger && iInfectedClass != L4D2ZombieClass_Tank && !L4D_IsPlayerStaggering(iInfectedTarget) && !IsUsingSpecialAbility(iInfectedTarget)) && GetRandomInt(1, 4) == 1)
 			{
 				SnapViewToPosition(iClient, fInfectedPos);				
 				iButtons |= IN_ATTACK2;
@@ -2060,7 +2073,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 				g_fSurvivorBot_Grenade_ThrowPos[iClient] = fThrowPosition;
 
-				if (g_iSurvivorBot_ThreatInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.33)) && CheckIsUnableToThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
+				if (g_iSurvivorBot_ThreatInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.33) && CheckIsUnableToThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
 				{
 					g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
 					SwitchWeaponSlot(iClient, ((GetClientPrimaryAmmo(iClient) > 0) ? 0 : 1));
@@ -2437,6 +2450,13 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 {
 	if (!IsFakeClient(iClient) || GetClientTeam(iClient) != 2 || !IsPlayerAlive(iClient))
 		return Plugin_Continue;
+
+	if (IsSurvivorBotBlindedByVomit(iClient) && (IsValidClient(iAttacker) && GetClientTeam(iAttacker) == 3 || IsCommonInfected(iAttacker)))
+	{
+		float fLookPos[3]; GetEntityCenteroid(iAttacker, fLookPos);
+		BotLookAtPosition(iClient, fLookPos, 1.0);
+		g_bSurvivorBot_ForceBash[iClient] = true;
+	}
 
 	if (iDamageType & DMG_FALL && GetGameTime() <= g_fSurvivorBot_TimeSinceLeftLadder[iClient])
 	{
@@ -3321,10 +3341,10 @@ void PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 
 	if (fNextFireT <= 0.0 || GetGameTime() > g_fSurvivorBot_NextPressAttackTime[iClient])
 	{
+		if (GetWeaponClip1(iWeapon) > 0)g_fSurvivorBot_BlockWeaponReloadTime[iClient] = GetGameTime() + 2.0;
 		buttons |= IN_ATTACK;
 		g_bClient_IsFiringWeapon[iClient] = true;
 		g_fSurvivorBot_NextPressAttackTime[iClient] = GetGameTime() + fNextFireT;
-		if (GetWeaponClip1(iWeapon) > 0)g_fSurvivorBot_BlockWeaponReloadTime[iClient] = GetGameTime() + 1.0;
 	}
 }
 
@@ -4591,6 +4611,12 @@ bool IsEntityExists(int iEntity)
 	return (iEntity > 0 && (iEntity <= MAXENTITIES && IsValidEdict(iEntity) || IsValidEntity(iEntity)));
 }
 
+bool IsCommonInfected(int iEntity)
+{
+	char szEntClass[64]; GetEntityClassname(iEntity, szEntClass, sizeof(szEntClass));
+	return (strcmp(szEntClass, "infected") == 0);
+}
+
 bool IsCommonInfectedAttacking(int iEntity)
 {
 	return (GetEntProp(iEntity, Prop_Send, "m_mobRush") != 0 || GetEntProp(iEntity, Prop_Send, "m_clientLookatTarget") != -1);
@@ -4599,6 +4625,12 @@ bool IsCommonInfectedAttacking(int iEntity)
 bool IsCommonInfectedAlive(int iEntity)
 {
 	return (GetEntProp(iEntity, Prop_Data, "m_lifeState") == 0 && GetEntProp(iEntity, Prop_Send, "m_bIsBurning") == 0);
+}
+
+bool IsCommonInfectedStumbled(int iEntity)
+{
+	if (!g_bExtensionActions)return false;
+	return (ActionsManager.GetAction(iEntity, "InfectedShoved") != INVALID_ACTION);
 }
 
 int GetFarthestInfected(int iClient, float fDistance = -1.0)
