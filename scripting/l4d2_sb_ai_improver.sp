@@ -195,8 +195,8 @@ static ConVar g_hCvar_NextProcessTime;
 static float g_fCvar_NextProcessTime;
 
 /*============ MISC CONVARS =========================================================*/
-static ConVar g_hCvar_BotsFieldOfView;
-static float g_fCvar_BotsFieldOfView;
+static ConVar g_hCvar_VisionFieldOfView;
+static float g_fCvar_VisionFieldOfView;
 
 static ConVar g_hCvar_SpitterAcidEvasion;
 static bool g_bCvar_SpitterAcidEvasion;
@@ -566,7 +566,7 @@ void CreateAndHookConVars()
 	g_hCvar_MaxWeaponTier3_M60 						= CreateConVar("l4d2_improvedbots_tier3weaponlimit_m60", "1", "The total number of M60s allowed on the team. <0: Bots never use M60>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_MaxWeaponTier3_GLauncher 				= CreateConVar("l4d2_improvedbots_tier3weaponlimit_grenadelauncher", "1", "The total number of grenade launchers allowed on the team. <0: Bots never use grenade launcher>", FCVAR_NOTIFY, true, 0.0);
 	
-	g_hCvar_BotsFieldOfView 						= CreateConVar("l4d2_improvedbots_bots_fov", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
+	g_hCvar_VisionFieldOfView 						= CreateConVar("l4d2_improvedbots_fieldofview", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
 	
 	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "0", "If survivor bot shouldn't drop his currently carrying prop no matter what.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -575,7 +575,7 @@ void CreateAndHookConVars()
 	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("l4d2_improvedbots_witchbehavior_walkwhennearby", "500", "Survivor bots will start walking near witch if they're this range near her and she's not disturbed. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun. <0: Disabled; 1: Only if survivor team doesn't have any human players left; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 
-	g_hCvar_NextProcessTime 						= CreateConVar("l4d2_improvedbots_process_time", "0.15", "Delay required for bots to process heavy computings on CPU ('for', 'while' loops, etc.).", FCVAR_NOTIFY, true, 0.033);
+	g_hCvar_NextProcessTime 						= CreateConVar("l4d2_improvedbots_process_time", "0.1", "Delay required for bots to process heavy computings on CPU ('for', 'while' loops, etc.).", FCVAR_NOTIFY, true, 0.033);
 
 	g_hCvar_GameDifficulty.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxMeleeSurvivors.AddChangeHook(OnConVarChanged);
@@ -648,7 +648,7 @@ void CreateAndHookConVars()
 	g_hCvar_MaxWeaponTier3_M60.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxWeaponTier3_GLauncher.AddChangeHook(OnConVarChanged);
 	
-	g_hCvar_BotsFieldOfView.AddChangeHook(OnConVarChanged);
+	g_hCvar_VisionFieldOfView.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_SpitterAcidEvasion.AddChangeHook(OnConVarChanged);
 	g_hCvar_AlwaysCarryProp.AddChangeHook(OnConVarChanged);
@@ -748,7 +748,7 @@ void UpdateConVarValues()
 	g_iCvar_MaxWeaponTier3_M60 							= g_hCvar_MaxWeaponTier3_M60.IntValue;
 	g_iCvar_MaxWeaponTier3_GLauncher 					= g_hCvar_MaxWeaponTier3_GLauncher.IntValue;
 	
-	g_fCvar_BotsFieldOfView 							= g_hCvar_BotsFieldOfView.FloatValue;
+	g_fCvar_VisionFieldOfView 							= g_hCvar_VisionFieldOfView.FloatValue;
 
 	g_bCvar_SpitterAcidEvasion							= g_hCvar_SpitterAcidEvasion.BoolValue;
 	g_bCvar_AlwaysCarryProp								= g_hCvar_AlwaysCarryProp.BoolValue;
@@ -1945,7 +1945,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 		if ((g_iCvar_AutoShove_Enabled == 1 || g_iCvar_AutoShove_Enabled == 2 && !FVectorInViewAngle(iClient, fInfectedPos)) && fInfectedDist <= (80.0*80.0) && !L4D_IsPlayerIncapacitated(iClient) && (!IsSurvivorBusy(iClient) || g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iSurvivorBot_NearbyFriends[iClient]) / (iTeamCount - 1)))) && (!SurvivorHasMeleeWeapon(iClient) || iCurWeapon != iWpnSlots[1]))
 		{
-			if (IsSurvivorCarryingProp(iClient) || (!g_bExtensionActions || iInfectedClass == L4D2ZombieClass_NotInfected && !IsCommonInfectedStumbled(iInfectedTarget) || iInfectedClass != L4D2ZombieClass_Charger && iInfectedClass != L4D2ZombieClass_Tank && !L4D_IsPlayerStaggering(iInfectedTarget) && !IsUsingSpecialAbility(iInfectedTarget)) && GetRandomInt(1, 4) == 1)
+			if (IsSurvivorCarryingProp(iClient) || (iInfectedClass == L4D2ZombieClass_NotInfected || iInfectedClass != L4D2ZombieClass_Charger && iInfectedClass != L4D2ZombieClass_Tank && !L4D_IsPlayerStaggering(iInfectedTarget) && !IsUsingSpecialAbility(iInfectedTarget)) && GetRandomInt(1, 4) == 1)
 			{
 				SnapViewToPosition(iClient, fInfectedPos);				
 				iButtons |= IN_ATTACK2;
@@ -1980,7 +1980,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		if (IsEntityExists(iFireTarget)) 
 		{
 			CheckEntityForVisibility(iClient, iFireTarget, NULL_VECTOR);
-			if (HasSurvivorBotSeenEntity(iClient, iFireTarget, (iFireTarget != iTankTarget)) && IsVisibleEntity(iClient, iFireTarget))
+			if (HasSurvivorBotSeenEntity(iClient, iFireTarget, true) && IsVisibleEntity(iClient, iFireTarget))
 			{
 				L4D2ZombieClassType iInfectedClass = L4D2ZombieClass_NotInfected;
 				if (IsValidClient(iFireTarget))iInfectedClass = L4D2_GetPlayerZombieClass(iFireTarget);
@@ -3078,7 +3078,7 @@ int CalculateGrenadeThrowInfectedCount()
 	float fCountScale = g_fCvar_GrenadeThrow_HordeSize;
 	int iFinalCount = RoundFloat(iFreeSurvivors * fCountScale);
 	if (iFinalCount < 1)iFinalCount = RoundFloat(fCountScale);
-
+	if (L4D2_IsTankInPlay())iFinalCount = RoundFloat(iFinalCount * 0.66);
 	return iFinalCount;
 }
 
@@ -4754,7 +4754,7 @@ void CheckEntityForVisibility(int iClient, int iEntity, float fOverridePos[3], i
 		{
 			case 0:
 			{
-				fNoticeTime = ClampFloat(0.33 * (fDot / g_fCvar_BotsFieldOfView) + (fEntityDist / (4096.0*4096.0)), 0.1, 0.75);
+				fNoticeTime = ClampFloat(0.33 * (fDot / g_fCvar_VisionFieldOfView) + (fEntityDist / (4096.0*4096.0)), 0.1, 0.75);
 				g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] = 1;
 				g_fSurvivorBot_VisionMemory_Time_FOV[iClient][iEntity] = GetGameTime() + fNoticeTime;
 			}
@@ -4936,7 +4936,7 @@ float GetLineOfSightDotProduct(int iClient, const float fVecSpot[3])
 
 bool FVectorInViewCone(int iClient, const float fVecSpot[3], float fCone = -1.0)
 {
-	if (fCone == -1.0)fCone = g_fCvar_BotsFieldOfView;
+	if (fCone == -1.0)fCone = g_fCvar_VisionFieldOfView;
 	return (RadToDeg(ArcCosine(GetLineOfSightDotProduct(iClient, fVecSpot))) <= fCone);
 }
 
@@ -4957,13 +4957,13 @@ float GetViewAnglesDotProduct(int iClient, const float fVecSpot[3])
 
 bool FVectorInViewAngle(int iClient, const float fVecSpot[3], float fAngle = -1.0)
 {
-	if (fAngle == -1.0)fAngle = g_fCvar_BotsFieldOfView;
+	if (fAngle == -1.0)fAngle = g_fCvar_VisionFieldOfView;
 	return (RadToDeg(ArcCosine(GetViewAnglesDotProduct(iClient, fVecSpot))) <= fAngle);
 }
 
 bool FEntityInViewAngle(int iClient, int iEntity, float fAngle = -1.0)
 {
-	if (fAngle == -1.0)fAngle = g_fCvar_BotsFieldOfView;
+	if (fAngle == -1.0)fAngle = g_fCvar_VisionFieldOfView;
 	float fEntityAbsOrigin[3]; GetEntityCenteroid(iEntity, fEntityAbsOrigin);
 	return (RadToDeg(ArcCosine(GetViewAnglesDotProduct(iClient, fEntityAbsOrigin))) <= fAngle);
 }
