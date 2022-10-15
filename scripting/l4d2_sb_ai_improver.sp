@@ -1746,11 +1746,13 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 	if (IsEntityExists(iWitchTarget) && GetEntityHealth(iWitchTarget) > 0)
 	{
-		float fWitchOrigin[3];
-		GetEntityAbsOrigin(iWitchTarget, fWitchOrigin);
+		float fWitchOrigin[3]; GetEntityAbsOrigin(iWitchTarget, fWitchOrigin);
+		float fWitchDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fWitchOrigin, true);
 
 		float fFirePos[3]; 
 		GetTargetAimPart(iClient, iWitchTarget, fFirePos);
+
+		int iHasShotgun = SurvivorHasShotgun(iClient);
 
 		if (IsValidClient(iWitchHarasser))
 		{
@@ -1762,61 +1764,51 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 					if (!SurvivorHasMeleeWeapon(iClient))fShootRange = g_fCvar_TargetSelection_ShootRange4;
 					else fShootRange = g_fCvar_ImprovedMelee_AttackRange;
 				}
-				else if (SurvivorHasShotgun(iClient))fShootRange = g_fCvar_TargetSelection_ShootRange2;
+				else if (iHasShotgun)fShootRange = g_fCvar_TargetSelection_ShootRange2;
 				else if (SurvivorHasSniperRifle(iClient))fShootRange = g_fCvar_TargetSelection_ShootRange3;
 
-				if (GetVectorDistance(g_fClientEyePos[iClient], fFirePos, true) <= (fShootRange*fShootRange) && IsVisibleEntity(iClient, iWitchTarget))
+				bool bWitchVisible = IsVisibleEntity(iClient, iWitchTarget);
+				if (fWitchDist <= (fShootRange*fShootRange) && bWitchVisible)
 				{
 					SnapViewToPosition(iClient, fFirePos);				
-					PressAttackButton(iClient, iButtons);
+					bool bFired = PressAttackButton(iClient, iButtons);
+					if (iHasShotgun == 1 && bFired)g_bSurvivorBot_ForceBash[iClient] = true;
 
 					if (fShootRange != g_fCvar_TargetSelection_ShootRange2 && fShootRange != g_fCvar_ImprovedMelee_AttackRange)
 					{
 						ClearMoveToPosition(iClient, "GoToWitch");
 					}
 				}
-				else
+				else if (iWitchHarasser != iClient)
 				{
-					SetMoveToPosition(iClient, fWitchOrigin, 3, "GoToWitch", 0.0, (fShootRange > 256.0 ? 256.0 : fShootRange), true);
+					SetMoveToPosition(iClient, fWitchOrigin, 3, "GoToWitch", 0.0, ((bWitchVisible && !L4D_IsPlayerIncapacitated(iWitchHarasser)) ? (fShootRange > 192.0 ? 192.0 : fShootRange) : 0.0), true);
 				}
 			}
 
-			if (!L4D_IsPlayerIncapacitated(iClient))
+			if (iWitchHarasser == iClient && !L4D_IsPlayerIncapacitated(iClient))
 			{
-				if (iWitchHarasser == iClient)
-				{
-					LBI_CommandABot(iClient, 2, NULL_VECTOR, iWitchTarget);
-				}
-				else if (!IsVisibleEntity(iClient, iWitchTarget))
-				{
-					SetMoveToPosition(iClient, fWitchOrigin, 3, "GoToWitch", 0.0, _, true);
-				}
+				LBI_CommandABot(iClient, 2, NULL_VECTOR, iWitchTarget);
 			}
 		}
 		else 
 		{
-			float fWitchRage = ((GetEntPropFloat(iWitchTarget, Prop_Send, "m_rage") + GetEntPropFloat(iWitchTarget, Prop_Send, "m_wanderrage")) / 2);
 			float fWalkDist = g_fCvar_WitchBehavior_WalkWhenNearby;
-			if (fWalkDist != 0.0 && fWitchRage <= 0.5 && GetVectorDistance(g_fClientAbsOrigin[iClient], fWitchOrigin, true) <= (fWalkDist*fWalkDist) && !LBI_IsSurvivorInCombat(iClient))
+			if (fWalkDist != 0.0 && fWitchDist <= (fWalkDist*fWalkDist) && (GetEntPropFloat(iWitchTarget, Prop_Send, "m_rage") <= 0.5 && GetEntPropFloat(iWitchTarget, Prop_Send, "m_wanderrage") <= 0.5) && !LBI_IsSurvivorInCombat(iClient))
 			{
 				iButtons |= IN_SPEED;
 			}
 
-			int iHasShotgun = SurvivorHasShotgun(iClient);
 			int iCrowning = g_iCvar_WitchBehavior_AllowCrowning;
-			if ((iCrowning == 2 || iCrowning == 1 && !bTeamHasHumanPlayer) && !L4D_IsPlayerOnThirdStrike(iClient) && iCurWeapon == iWpnSlots[0] && GetVectorDistance(g_fClientAbsOrigin[iClient], fWitchOrigin, true) <= (1024.0*1024.0) && LBI_IsSurvivorBotAvailable(iClient) && (!IsValidClient(iTeamLeader) || GetVectorDistance(g_fClientAbsOrigin[iTeamLeader], fWitchOrigin, true) <= (512.0*512.0)) && !IsWeaponReloading(iCurWeapon, false) && iHasShotgun && IsVisibleEntity(iClient, iWitchTarget))
+			if ((iCrowning == 2 || iCrowning == 1 && !bTeamHasHumanPlayer) && iCurWeapon == iWpnSlots[0] && fWitchDist <= (1024.0*1024.0) && !L4D_IsPlayerOnThirdStrike(iClient) && (!IsValidClient(iTeamLeader) || fWitchDist <= (512.0*512.0)) && !IsWeaponReloading(iCurWeapon, false) && iHasShotgun && IsVisibleEntity(iClient, iWitchTarget))
 			{
-				float fSafeDist = (256.0 * fWitchRage);
-				if (fSafeDist < 90.0)fSafeDist = 90.0;
-
-				if (GetVectorDistance(g_fClientEyePos[iClient], fFirePos, true) <= (fSafeDist*fSafeDist))
+				if (fWitchDist <= (64.0*64.0))
 				{
 					ClearMoveToPosition(iClient, "GoToWitch");
-					SnapViewToPosition(iClient, fFirePos);				
-					PressAttackButton(iClient, iButtons);
-					if (iHasShotgun == 1)g_bSurvivorBot_ForceBash[iClient] = true;
+					SnapViewToPosition(iClient, fFirePos);
+					bool bFired = PressAttackButton(iClient, iButtons);
+					if (iHasShotgun == 1 && bFired)g_bSurvivorBot_ForceBash[iClient] = true;
 				}
-				else
+				else if (LBI_IsSurvivorBotAvailable(iClient))
 				{
 					bool bApproachWitch = !ShouldUseFlowDistance();
 					if (!bApproachWitch)
@@ -1824,12 +1816,13 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 						Address pArea = L4D2Direct_GetTerrorNavArea(fWitchOrigin);
 						bApproachWitch = (pArea != Address_Null && L4D2Direct_GetTerrorNavAreaFlow(pArea) >= L4D2Direct_GetFlowDistance(iClient));
 					}
-					if (bApproachWitch)SetMoveToPosition(iClient, fWitchOrigin, 2, "GoToWitch", 0.0, fSafeDist, true);
+					if (bApproachWitch)SetMoveToPosition(iClient, fWitchOrigin, 2, "GoToWitch", 0.0, 0.0, true);
+
+					if (fWitchDist <= (128.0*128.0))
+					{
+						SnapViewToPosition(iClient, fFirePos);
+					}
 				}
-			}
-			else
-			{
-				ClearMoveToPosition(iClient, "GoToWitch");
 			}
 		}
 	}
@@ -2869,15 +2862,13 @@ bool SurvivorBot_AbleToShootWeapon(int iClient)
 
 void GetClosestToEyePosEntityBonePos(int iClient, int iTarget, float fAimPos[3])
 {
-	bool bBoneValid;
-	float fLastDist = -1.0;
-	float fBoneDist, fBonePos[3], fAimPartPos[3];
+	float fBoneDist, fBonePos[3], fAimPartPos[3], fLastDist = -1.0;
 	if (SDKCall(g_hLookupBone, iTarget, "ValveBiped.Bip01_Pelvis") != -1)
 	{
 		for (int i = 0; i < sizeof(g_szBoneNames_Old); i++)
 		{
-			bBoneValid = LBI_GetBonePosition(iTarget, g_szBoneNames_Old[i], fBonePos);
-			if (!bBoneValid)continue;
+			if (!LBI_GetBonePosition(iTarget, g_szBoneNames_Old[i], fBonePos))
+				continue;
 
 			fBoneDist = GetVectorDistance(g_fClientEyePos[iClient], fBonePos, true);
 			if (fLastDist != -1.0 && fBoneDist >= fLastDist)continue;
@@ -2890,8 +2881,8 @@ void GetClosestToEyePosEntityBonePos(int iClient, int iTarget, float fAimPos[3])
 	{
 		for (int i = 0; i < sizeof(g_szBoneNames_New); i++)
 		{
-			bBoneValid = LBI_GetBonePosition(iTarget, g_szBoneNames_New[i], fBonePos);
-			if (!bBoneValid)continue;
+			if (!LBI_GetBonePosition(iTarget, g_szBoneNames_New[i], fBonePos))
+				continue;
 
 			fBoneDist = GetVectorDistance(g_fClientEyePos[iClient], fBonePos, true);
 			if (fLastDist != -1.0 && fBoneDist >= fLastDist)continue;
@@ -2900,38 +2891,41 @@ void GetClosestToEyePosEntityBonePos(int iClient, int iTarget, float fAimPos[3])
 			fAimPartPos = fBonePos;
 		}
 	}
-
 	fAimPos = fAimPartPos;
 }
 
 void GetTargetAimPart(int iClient, int iTarget, float fAimPos[3])
 {
-	if ((IsWeaponSlotActive(iClient, 2) || IsWeaponSlotActive(iClient, 0) && SurvivorHasTier3Weapon(iClient) == 1) && (!IsSpecialInfected(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Jockey))
+	if (IsWeaponSlotActive(iClient, 0) && SurvivorHasTier3Weapon(iClient) == 1 && (!IsValidClient(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Jockey))
 	{
 		GetEntityAbsOrigin(iTarget, fAimPos);
 		return;
 	}
 
 	char szAimBone[64];
+	float fDist = GetEntityDistance(iClient, iTarget, true);
 	bool bIsUsingOldSkeleton = (SDKCall(g_hLookupBone, iTarget, "ValveBiped.Bip01_Pelvis") != -1);
-	if ((!IsSpecialInfected(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Tank) && (IsWitch(iTarget) && SurvivorHasShotgun(iClient) && IsWeaponSlotActive(iClient, 0) && GetEntityDistance(iClient, iTarget, true) <= (256.0*256.0) || L4D_IsPlayerIncapacitated(iClient) && GetEntityDistance(iClient, iTarget, true) <= (384.0*384.0) || L4D2_IsRealismMode() && GetEntityDistance(iClient, iTarget, true) <= (512.0*512.0)))
+	if (IsWitch(iTarget) && fDist <= (256.0*256.0) && IsWeaponSlotActive(iClient, 0) && SurvivorHasShotgun(iClient) || (L4D_IsPlayerIncapacitated(iClient) && fDist <= (384.0*384.0) || L4D2_IsRealismMode() && fDist <= (512.0*512.0)) && (!IsValidClient(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Tank))
+	{
 		strcopy(szAimBone, sizeof(szAimBone), (bIsUsingOldSkeleton ? "ValveBiped.Bip01_Head1" : "bip_head"));
+	}
 	else
+	{
 		strcopy(szAimBone, sizeof(szAimBone), (bIsUsingOldSkeleton ? "ValveBiped.Bip01_Spine2" : "bip_spine_2"));
+	}
 
 	float fAimPartPos[3]; 
 	LBI_GetBonePosition(iTarget, szAimBone, fAimPartPos);
 
 	if (!IsVisibleVector(iClient, fAimPartPos))
 	{
-		bool bBoneIsValid = false;
 		bool bVisibleOther = false;
 		if (bIsUsingOldSkeleton)
 		{
 			for (int i = 0; i < sizeof(g_szBoneNames_Old); i++)
 			{
-				bBoneIsValid = LBI_GetBonePosition(iTarget, g_szBoneNames_Old[i], fAimPartPos);
-				if (!bBoneIsValid)continue;
+				if (!LBI_GetBonePosition(iTarget, g_szBoneNames_Old[i], fAimPartPos))
+				continue;
 
 				if (IsVisibleVector(iClient, fAimPartPos))
 				{
@@ -2944,8 +2938,8 @@ void GetTargetAimPart(int iClient, int iTarget, float fAimPos[3])
 		{
 			for (int i = 0; i < sizeof(g_szBoneNames_New); i++)
 			{
-				bBoneIsValid = LBI_GetBonePosition(iTarget, g_szBoneNames_New[i], fAimPartPos);
-				if (!bBoneIsValid)continue;
+				if (!LBI_GetBonePosition(iTarget, g_szBoneNames_New[i], fAimPartPos))
+				continue;
 
 				if (IsVisibleVector(iClient, fAimPartPos))
 				{
@@ -3293,21 +3287,21 @@ static const char g_szSemiAutoWeapons[][] =
 	"molotov",
 	"vomitjar"
 };
-void PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
+bool PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 {
 	if (g_bClient_IsFiringWeapon[iClient])
-		return;
+		return false;
 
 	int iWeapon = L4D_GetPlayerCurrentWeapon(iClient);
-	if (iWeapon == -1)return;
+	if (iWeapon == -1)return false;
 	
 	if (IsFakeClient(iClient))
 	{	
 		if (g_bSurvivorBot_PreventFire[iClient] || !SurvivorBot_CanFreelyFireWeapon(iClient))
-			return;
+			return false;
 
 		static ConVar cvarDontShoot; if (!cvarDontShoot)cvarDontShoot = FindConVar("sb_dont_shoot");
-		if (cvarDontShoot.BoolValue)return;
+		if (cvarDontShoot.BoolValue)return false;
 	}
 
 	char szClassname[64];
@@ -3345,7 +3339,9 @@ void PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 		buttons |= IN_ATTACK;
 		g_bClient_IsFiringWeapon[iClient] = true;
 		g_fSurvivorBot_NextPressAttackTime[iClient] = GetGameTime() + fNextFireT;
+		return true;
 	}
+	return false;
 }
 
 int GetWeaponAmmoType(int iWeapon)
