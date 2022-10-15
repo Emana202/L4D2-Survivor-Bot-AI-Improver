@@ -1,6 +1,8 @@
 # L4D2 Survivor Bot AI Improver
 A SourceMod plugin for L4D2 trying to improve survivor bots' AI as much as possible
 
+Config file is created after starting any campaign with plugin enabled at least once and is located in "(Game installation path)/left4dead2/cfg/sourcemod/l4d2_improved_bots.cfg"
+
 ---
 
 ## Notable features
