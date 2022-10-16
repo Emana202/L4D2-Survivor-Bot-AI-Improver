@@ -2862,8 +2862,8 @@ bool SurvivorBot_IsTargetShootable(int iClient, int iTarget, int iCurWeapon, flo
 	bool bInViewCone = (GetClientAimTarget(iClient, false) == iTarget);	
 	if (!bInViewCone)
 	{
-		float fCone = 2.0 * ((768.0*768.0) / GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iTarget], true));
-		if (iCurWeapon == iPrimarySlot && SurvivorHasShotgun(iClient) != 0)fCone *= 2.0;
+		float fCone = 2.0 * (768.0 / GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iTarget]));
+		if (iCurWeapon == iPrimarySlot && SurvivorHasShotgun(iClient))fCone *= 2.0;
 		bInViewCone = (FVectorInViewCone(iClient, g_fClientCenteroid[iTarget], fCone) && IsVisibleEntity(iClient, iTarget));
 	}
 
@@ -3968,7 +3968,7 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 	float fClientPos[3];
 	GetEntityAbsOrigin(iClient, fClientPos);
 
-	int iEntIndex, iNavArea, iUseCount, iPrimarySlot;
+	int iEntIndex, iNavArea, iUseCount;
 	float fEntityPos[3];
 	float fCheckDist, fCurDist;
 	bool bIsTaken, bInUseRange, bValidClient = IsValidClient(iClient);
@@ -3976,9 +3976,11 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 	char szWeaponName[MAX_TARGET_LENGTH];
 	char szEntityModel[PLATFORM_MAX_PATH];
 
+	int iPrimarySlot, iPrimaryTier;
 	if (bValidClient)
 	{
 		iPrimarySlot = GetClientWeaponInventory(iClient, 0);
+		iPrimaryTier = GetWeaponTier(iPrimarySlot);
 	}
 
 	for (int i = 0; i < hArrayList.Length; i++)
@@ -4021,7 +4023,7 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 		fCheckDist = fDistance; 
 		if (bValidClient)
 		{
-			if (g_bCvar_SwitchOffCSSWeapons && iPrimarySlot != -1 && WeaponHasEnoughAmmoLeft(iPrimarySlot) && (strcmp(szWeaponName[7], "smg_mp5") == 0 || strcmp(szWeaponName[7], "rifle_sg552") == 0 || strcmp(szWeaponName[7], "sniper_scout") == 0 || strcmp(szWeaponName[7], "sniper_awp") == 0))
+			if (g_bCvar_SwitchOffCSSWeapons && iPrimarySlot != -1 && WeaponHasEnoughAmmoLeft(iPrimarySlot) && (iPrimaryTier == 1 && strcmp(szWeaponName[7], "smg_mp5") == 0 || iPrimaryTier == 2 && (strcmp(szWeaponName[7], "rifle_sg552") == 0 || strcmp(szWeaponName[7], "sniper_scout") == 0 || strcmp(szWeaponName[7], "sniper_awp") == 0)))
 				continue;
 
 			if (strcmp(szWeaponName[7], "grenade_launcher") == 0 && g_iWeapon_AmmoLeft[iEntIndex] <= RoundFloat(g_iWeapon_MaxAmmo[iEntIndex] * 0.2))
