@@ -196,15 +196,21 @@ static float g_fCvar_NextProcessTime;
 
 /*============ MISC CONVARS =========================================================*/
 static ConVar g_hCvar_VisionFieldOfView;
-static float g_fCvar_VisionFieldOfView;
-
-static ConVar g_hCvar_SpitterAcidEvasion;
-static bool g_bCvar_SpitterAcidEvasion;
-
 static ConVar g_hCvar_AlwaysCarryProp;
-static bool g_bCvar_AlwaysCarryProp;
-
+static ConVar g_hCvar_SpitterAcidEvasion;
+static ConVar g_hCvar_SwitchOffCSSWeapons;
 static ConVar g_hCvar_KeepMovingInCombat;
+static ConVar g_hCvar_ChargerEvasion;
+static ConVar g_hCvar_UseUpgradePacks;
+static ConVar g_hCvar_DontSwitchToPistol;
+
+static float g_fCvar_VisionFieldOfView;
+static bool g_bCvar_SpitterAcidEvasion;
+static bool g_bCvar_AlwaysCarryProp;
+static bool g_bCvar_SwitchOffCSSWeapons;
+static bool g_bCvar_ChargerEvasion;
+static bool g_bCvar_UseUpgradePacks;
+static bool g_bCvar_DontSwitchToPistol;
 
 /*============ VARIABLES =========================================================*/
 static float g_fSurvivorBot_NextPressAttackTime[MAXPLAYERS+1];
@@ -547,10 +553,8 @@ void CreateAndHookConVars()
 	g_hCvar_ItemScavenge_Items 						= CreateConVar("l4d2_improvedbots_itemscavenge_enabled", "16383", "Enable improved bot item scavenging for specified items. <0: Disable, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defibrillator, 32: UpgradePack, 64: Pain Pills, 128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons. Add numbers together>", FCVAR_NOTIFY, true, 0.0, true, 16383.0);
 	g_hCvar_ItemScavenge_ApproachRange 				= CreateConVar("l4d2_improvedbots_itemscavenge_scavenge_distance", "300", "Distance at which item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ItemScavenge_ApproachVisibleRange 		= CreateConVar("l4d2_improvedbots_itemscavenge_scavenge_visible_distance", "600", "Distance at which a visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_PickupRange 				= CreateConVar("l4d2_improvedbots_itemscavenge_pickup_distance", "90", "Distance at which item should be for bot to able to pick it up.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_PickupRange 				= CreateConVar("l4d2_improvedbots_itemscavenge_pickup_distance", "96", "Distance at which item should be for bot to able to pick it up.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ItemScavenge_NoHumansRangeMultiplier	= CreateConVar("l4d2_improvedbots_itemscavenge_nohumans_rangemultiplier", "3.0", "The bots' scavenge distance is multiplied to this value when there's no human players left in the team.", FCVAR_NOTIFY, true, 0.0);
-
-	g_hCvar_BotWeaponPreference_ForceMagnum 		= CreateConVar("l4d2_improvedbots_weapon_preference_magnums_only", "0", "Makes every survivor bot only equip magnum instead of regular pistol if it's possible.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_BotWeaponPreference_Nick 				= CreateConVar("l4d2_improvedbots_weapon_preference_nick", "1", "Bot Nick's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
 	g_hCvar_BotWeaponPreference_Rochelle 			= CreateConVar("l4d2_improvedbots_weapon_preference_rochelle", "1", "Bot Rochelle's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
@@ -560,9 +564,10 @@ void CreateAndHookConVars()
 	g_hCvar_BotWeaponPreference_Zoey 				= CreateConVar("l4d2_improvedbots_weapon_preference_zoey", "3", "Bot Zoey's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
 	g_hCvar_BotWeaponPreference_Francis 			= CreateConVar("l4d2_improvedbots_weapon_preference_francis", "2", "Bot Francis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
 	g_hCvar_BotWeaponPreference_Louis 				= CreateConVar("l4d2_improvedbots_weapon_preference_louis", "1", "Bot Louis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_ForceMagnum 		= CreateConVar("l4d2_improvedbots_weapon_preference_magnums_only", "0", "If every survivor bot should only use magnum instead of regular pistol if possible.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-	g_hCvar_SwapSameTypePrimaries 					= CreateConVar("l4d2_improvedbots_changeweaponsubtypeiftoomany_primaries", "1", "Makes survivor bots change their primary weapon subtype if there's too much of the same one, Ex. change AK-47 to M16 or SPAS-12 to Autoshotgun.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_SwapSameTypeGrenades 					= CreateConVar("l4d2_improvedbots_changeweaponsubtypeiftoomany_grenades", "1", "Makes survivor bots change their grenade type if there's too much of the same one, Ex. Pipe-Bomb to Molotov.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_SwapSameTypePrimaries 					= CreateConVar("l4d2_improvedbots_changeweaponiftoomanysubtype_primaries", "1", "Makes survivor bots change their primary weapon subtype if there's too much of the same one, Ex. change AK-47 to M16 or SPAS-12 to Autoshotgun.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_SwapSameTypeGrenades 					= CreateConVar("l4d2_improvedbots_changeweaponiftoomanysubtype_grenades", "1", "Makes survivor bots change their grenade type if there's too much of the same one, Ex. Pipe-Bomb to Molotov.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_MaxWeaponTier3_M60 						= CreateConVar("l4d2_improvedbots_tier3weaponlimit_m60", "1", "The total number of M60s allowed on the team. <0: Bots never use M60>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_MaxWeaponTier3_GLauncher 				= CreateConVar("l4d2_improvedbots_tier3weaponlimit_grenadelauncher", "1", "The total number of grenade launchers allowed on the team. <0: Bots never use grenade launcher>", FCVAR_NOTIFY, true, 0.0);
@@ -571,7 +576,11 @@ void CreateAndHookConVars()
 	
 	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "0", "If survivor bot shouldn't drop his currently carrying prop no matter what.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_KeepMovingInCombat						= CreateConVar("l4d2_improvedbots_keepmovingincombat", "1", "If bots shouldn't stop when shooting infected when there's no human players in team.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_KeepMovingInCombat						= CreateConVar("l4d2_improvedbots_keepmovingincombat", "1", "If bots shouldn't stop moving in combat when there's no human players in team.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_SwitchOffCSSWeapons						= CreateConVar("l4d2_improvedbots_switchoffcssweapon", "1", "If bots should change their primary weapon to other one if they're using CSS weapons.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_ChargerEvasion							= CreateConVar("l4d2_improvedbots_chargerevasion", "1", "Enables survivor bots's charger dodging behavior.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_UseUpgradePacks							= CreateConVar("l4d2_improvedbots_useupgradepacks", "1", "If bots should place their upgradepack when not in combat.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_DontSwitchToPistol						= CreateConVar("l4d2_improvedbots_dontswitchtopistol", "1", "If bots shouldn't switch to their pistol while they have sniper rifle equiped.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("l4d2_improvedbots_witchbehavior_walkwhennearby", "500", "Survivor bots will start walking near witch if they're this range near her and she's not disturbed. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun. <0: Disabled; 1: Only if survivor team doesn't have any human players left; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
@@ -654,6 +663,10 @@ void CreateAndHookConVars()
 	g_hCvar_SpitterAcidEvasion.AddChangeHook(OnConVarChanged);
 	g_hCvar_AlwaysCarryProp.AddChangeHook(OnConVarChanged);
 	g_hCvar_KeepMovingInCombat.AddChangeHook(OnConVarChanged);
+	g_hCvar_SwitchOffCSSWeapons.AddChangeHook(OnConVarChanged);
+	g_hCvar_ChargerEvasion.AddChangeHook(OnConVarChanged);
+	g_hCvar_UseUpgradePacks.AddChangeHook(OnConVarChanged);
+	g_hCvar_DontSwitchToPistol.AddChangeHook(OnConVarChanged);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby.AddChangeHook(OnConVarChanged);
 	g_hCvar_WitchBehavior_AllowCrowning.AddChangeHook(OnConVarChanged);
@@ -750,10 +763,13 @@ void UpdateConVarValues()
 	g_iCvar_MaxWeaponTier3_GLauncher 					= g_hCvar_MaxWeaponTier3_GLauncher.IntValue;
 	
 	g_fCvar_VisionFieldOfView 							= g_hCvar_VisionFieldOfView.FloatValue;
-
 	g_bCvar_SpitterAcidEvasion							= g_hCvar_SpitterAcidEvasion.BoolValue;
 	g_bCvar_AlwaysCarryProp								= g_hCvar_AlwaysCarryProp.BoolValue;
-	
+	g_bCvar_SwitchOffCSSWeapons							= g_hCvar_SwitchOffCSSWeapons.BoolValue;
+	g_bCvar_ChargerEvasion								= g_hCvar_ChargerEvasion.BoolValue;
+	g_bCvar_UseUpgradePacks								= g_hCvar_UseUpgradePacks.BoolValue;
+	g_bCvar_DontSwitchToPistol							= g_hCvar_DontSwitchToPistol.BoolValue;
+
 	if (g_bMapStarted)
 	{
 		char szShouldHurryCode[64]; FormatEx(szShouldHurryCode, sizeof(szShouldHurryCode), "DirectorScript.GetDirectorOptions().cm_ShouldHurry <- %i;", g_hCvar_KeepMovingInCombat.IntValue);
@@ -1170,6 +1186,8 @@ void OnSurvivorPinned(int iVictim, float fMinTime, float fMaxTime)
 
 void Event_ChargeStart(Event hEvent, const char[] szName, bool bBroadcast)
 {
+	if (!g_bCvar_ChargerEvasion)return;
+
 	int iCharger = GetClientOfUserId(hEvent.GetInt("userid"));
 
 	float fChargerAngles[3];
@@ -2207,7 +2225,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 			}
 		}
 
-		if (iWpnSlots[0] != -1 && LBI_IsSurvivorBotAvailable(iClient) && SurvivorHasHealthKit(iClient) == 3)
+		if (g_bCvar_UseUpgradePacks && iWpnSlots[0] != -1 && iWpnSlots[3] != -1 && LBI_IsSurvivorBotAvailable(iClient) && LBI_IsSurvivorInCombat(iClient) && SurvivorHasHealthKit(iClient) == 3)
 		{
 			bool bHasDeployedPackNearby = false;
 			int iActiveDeployers = (GetSurvivorTeamActiveItemCount("weapon_upgradepack_incendiary") + GetSurvivorTeamActiveItemCount("weapon_upgradepack_explosive"));
@@ -2431,7 +2449,7 @@ Action OnSurvivorSwitchWeapon(int iClient, int iWeapon)
 				return Plugin_Handled;
 			}
 
-			if (GetSurvivorBotWeaponPreference(iClient) != L4D_WEAPON_PREFERENCE_SECONDARY && (!SurvivorHasMeleeWeapon(iClient) || g_iSurvivorBot_NearbyInfectedCount[iClient] < g_iCvar_ImprovedMelee_SwitchCount) && (SurvivorHasSniperRifle(iClient) || SurvivorHasShotgun(iClient)))
+			if (GetSurvivorBotWeaponPreference(iClient) != L4D_WEAPON_PREFERENCE_SECONDARY && (!SurvivorHasMeleeWeapon(iClient) || g_iSurvivorBot_NearbyInfectedCount[iClient] < g_iCvar_ImprovedMelee_SwitchCount) && ((g_bCvar_DontSwitchToPistol && SurvivorHasSniperRifle(iClient)) || SurvivorHasShotgun(iClient)))
 			{
 				return Plugin_Handled;
 			}
@@ -3703,6 +3721,42 @@ int CheckForItemsToScavenge(int iClient)
 			}
 		}
 
+		if (g_bCvar_SwitchOffCSSWeapons)
+		{
+			if (strcmp(szPrimarySlot[7], "smg_mp5") == 0)
+			{				
+				iArrayItem = GetItemFromArrayList(g_hSMGList, iClient, _, "!!smg_mp5");
+				if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
+				{
+					hItemList.Push(iArrayItem);
+				}
+			}
+			else if (strcmp(szPrimarySlot[7], "rifle_sg552") == 0) 
+			{				
+				iArrayItem = GetItemFromArrayList(g_hAssaultRifleList, iClient, _, "!!rifle_sg552");
+				if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
+				{
+					hItemList.Push(iArrayItem);
+				}
+			}
+			else if (strcmp(szPrimarySlot[7], "sniper_scout") == 0 || strcmp(szPrimarySlot[7], "sniper_awp") == 0)
+			{				
+				iArrayItem = GetItemFromArrayList(g_hSniperRifleList, iClient, _, "!!sniper_scout");
+				if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
+				{
+					hItemList.Push(iArrayItem);
+				}
+				else
+				{
+					iArrayItem = GetItemFromArrayList(g_hSniperRifleList, iClient, _, "!!sniper_awp");
+					if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
+					{
+						hItemList.Push(iArrayItem);
+					}	
+				}
+			}
+		}
+
 		if (g_bCvar_SwapSameTypePrimaries)
 		{
 			if (iWpnPreference != L4D_WEAPON_PREFERENCE_SMG)
@@ -3914,13 +3968,18 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 	float fClientPos[3];
 	GetEntityAbsOrigin(iClient, fClientPos);
 
-	int iEntIndex, iNavArea, iUseCount;
+	int iEntIndex, iNavArea, iUseCount, iPrimarySlot;
 	float fEntityPos[3];
 	float fCheckDist, fCurDist;
-	bool bIsTaken, bInUseRange;
+	bool bIsTaken, bInUseRange, bValidClient = IsValidClient(iClient);
 
 	char szWeaponName[MAX_TARGET_LENGTH];
 	char szEntityModel[PLATFORM_MAX_PATH];
+
+	if (bValidClient)
+	{
+		iPrimarySlot = GetClientWeaponInventory(iClient, 0);
+	}
 
 	for (int i = 0; i < hArrayList.Length; i++)
 	{		
@@ -3960,8 +4019,17 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 		}
 
 		fCheckDist = fDistance; 
-		if (IsValidClient(iClient))
+		if (bValidClient)
 		{
+			if (g_bCvar_SwitchOffCSSWeapons && iPrimarySlot != -1 && WeaponHasEnoughAmmoLeft(iPrimarySlot) && (strcmp(szWeaponName[7], "smg_mp5") == 0 || strcmp(szWeaponName[7], "rifle_sg552") == 0 || strcmp(szWeaponName[7], "sniper_scout") == 0 || strcmp(szWeaponName[7], "sniper_awp") == 0))
+				continue;
+
+			if (strcmp(szWeaponName[7], "grenade_launcher") == 0 && g_iWeapon_AmmoLeft[iEntIndex] <= RoundFloat(g_iWeapon_MaxAmmo[iEntIndex] * 0.2))
+				continue;
+
+			if (strcmp(szWeaponName[7], "rifle_m60") == 0 && (g_iWeapon_Clip1[iEntIndex] <= 0 || g_iWeapon_Clip1[iEntIndex] <= RoundFloat(L4D2_GetIntWeaponAttribute("weapon_rifle_m60", L4D2IWA_ClipSize) * 0.2)))
+				continue;
+
 			if (iUseCount == 1 && strcmp(szWeaponName[7], "ammo_spawn") != 0)
 			{
 				bIsTaken = false;
@@ -3998,12 +4066,6 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 
 		fCurDist = GetVectorDistance(fClientPos, fEntityPos, true);
 		if (!bInUseRange && fCurDist > (fCheckDist*fCheckDist))continue;
-
-		if (strcmp(szWeaponName[7], "rifle_m60") == 0 && (g_iWeapon_Clip1[iEntIndex] <= 0 || g_iWeapon_Clip1[iEntIndex] <= RoundFloat(L4D2_GetIntWeaponAttribute("weapon_rifle_m60", L4D2IWA_ClipSize) * 0.2)))
-			continue;
-
-		if (strcmp(szWeaponName[7], "grenade_launcher") == 0 && g_iWeapon_AmmoLeft[iEntIndex] <= RoundFloat(g_iWeapon_MaxAmmo[iEntIndex] * 0.2))
-			continue;
 
 		return iEntIndex;
 	}
