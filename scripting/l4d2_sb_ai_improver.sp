@@ -7,10 +7,6 @@
 #include <dhooks>
 #include <left4dhooks>
 
-#undef REQUIRE_PLUGIN
-#include <sceneprocessor>
-#define REQUIRE_PLUGIN
-
 #undef REQUIRE_EXTENSIONS
 #include <actions>
 #define REQUIRE_EXTENSIONS
@@ -20,7 +16,10 @@
 
 #define BOT_BOOMER_AVOID_RADIUS		200.0
 #define BOT_GRENADE_CHECK_RADIUS	300.0
-#define BOT_CMD_MOVE_INTERVAL 		0.66
+#define BOT_CMD_MOVE_INTERVAL 		0.8
+
+#define HUMAN_HEIGHT				71.0
+#define HUMAN_HALF_HEIGHT			35.5
 
 enum
 {
@@ -224,7 +223,6 @@ static bool g_bClient_IsLookingAtPosition[MAXPLAYERS+1];
 static bool g_bClient_IsFiringWeapon[MAXPLAYERS+1];
 
 static int g_iSurvivorBot_ScavengeItem[MAXPLAYERS+1];
-static float g_fSurvivorBot_ForceApproachDist[MAXPLAYERS+1];
 static float g_fSurvivorBot_NextUsePressTime[MAXPLAYERS+1];
 static float g_fSurvivorBot_NextScavengeItemScanTime[MAXPLAYERS+1];
 
@@ -242,9 +240,6 @@ static float g_fSurvivorBot_MeleeApproachTime[MAXPLAYERS+1];
 static float g_fSurvivorBot_ChainsawHoldTime[MAXPLAYERS+1];
 
 static float g_fSurvivorBot_TimeSinceLeftLadder[MAXPLAYERS+1];
-
-static int g_iSurvivorBot_HealTarget[MAXPLAYERS+1];
-static float g_fSurvivorBot_HealTargetResetTime[MAXPLAYERS+1];
 
 static int g_iSurvivorBot_DefibTarget[MAXPLAYERS+1];
 
@@ -265,12 +260,6 @@ static float g_fSurvivorBot_MovePos_Tolerance[MAXPLAYERS+1];
 static bool g_bSurvivorBot_MovePos_IgnoreDamaging[MAXPLAYERS+1];
 static char g_szSurvivorBot_MovePos_Name[MAXPLAYERS+1][512];
 
-static bool g_bSurvivorBot_ForceWeaponFire[MAXPLAYERS+1];
-static int g_iSurvivorBot_ForceWeaponFire_Slot[MAXPLAYERS+1];
-static float g_fSurvivorBot_ForceWeaponFire_Delay[MAXPLAYERS+1];
-static float g_fSurvivorBot_ForceWeaponFire_Duration[MAXPLAYERS+1];
-
-static bool g_bSurvivorBot_ForceThrowGrenade[MAXPLAYERS+1];
 static bool g_bSurvivorBot_ForceSwitchWeapon[MAXPLAYERS+1];
 static bool g_bSurvivorBot_ForceBash[MAXPLAYERS+1];
 
@@ -287,14 +276,13 @@ static int g_iSurvivorBot_VisionMemory_State_FOV[MAXPLAYERS+1][MAXENTITIES+1];
 static float g_fSurvivorBot_VisionMemory_Time[MAXPLAYERS+1][MAXENTITIES+1];
 static float g_fSurvivorBot_VisionMemory_Time_FOV[MAXPLAYERS+1][MAXENTITIES+1];
 
-static int g_iPlayerVocalize_OrderTarget[MAXPLAYERS+1];
-static float g_fPlayerVocalize_OrderTargetResetTime[MAXPLAYERS+1];
-
 static float g_fSurvivorBot_NextWeaponRangeSwitchTime[MAXPLAYERS+1];
 
 static bool g_bSurvivorBot_ForceWeaponReload[MAXPLAYERS+1];
 
 static int g_iSurvivorBot_NearbyFriends[MAXPLAYERS+1];
+
+static float g_fSurvivorBot_RetreatPosSearchTime[MAXPLAYERS+1];
 
 static int g_iBotProcessing_ProcessedCount;
 static bool g_bBotProcessing_IsProcessed[MAXPLAYERS+1];
@@ -463,8 +451,6 @@ public void OnPluginStart()
 	HookEvent("weapon_fire", Event_WeaponFire);
 	HookEvent("player_death", Event_PlayerDeath);
 	HookEvent("player_use", Event_OnPlayerUse);
-	HookEvent("heal_success", Event_OnHeal_Success);
-	HookEvent("give_weapon", Event_OnGiveWeapon);
 	
 	HookEvent("lunge_pounce", Event_HunterPounce);
 	HookEvent("tongue_grab", Event_TongueGrab);
@@ -772,7 +758,7 @@ void UpdateConVarValues()
 
 	if (g_bMapStarted)
 	{
-		char szShouldHurryCode[64]; FormatEx(szShouldHurryCode, sizeof(szShouldHurryCode), "DirectorScript.GetDirectorOptions().cm_ShouldHurry <- %i;", g_hCvar_KeepMovingInCombat.IntValue);
+		char szShouldHurryCode[64]; FormatEx(szShouldHurryCode, sizeof(szShouldHurryCode), "DirectorScript.GetDirectorOptions().cm_ShouldHurry <- %i", g_hCvar_KeepMovingInCombat.IntValue);
 		L4D2_ExecVScriptCode(szShouldHurryCode);
 	}
 
@@ -788,8 +774,6 @@ static Handle g_hLookupBone;
 static Handle g_hGetBonePosition; 
 
 static Handle g_hGetMaxClip1;
-
-static Handle g_hIsUseableEntity;
 static Handle g_hFindUseEntity;
 static Handle g_hIsInCombat;
 
@@ -862,17 +846,9 @@ void CreateAllSDKCalls(Handle hGameData)
 
 	StartPrepSDKCall(SDKCall_Player);
 	PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "SurvivorBot::IsAvailable");
-	PrepSDKCall_SetReturnInfo(SDKType_PlainOldData, SDKPass_Plain);
+	PrepSDKCall_SetReturnInfo(SDKType_Bool, SDKPass_Plain);
 	if ((g_hIsAvailable = EndPrepSDKCall()) == null)
 		SetFailState("Failed to create SDKCall for SurvivorBot::IsAvailable signature!");
-
-	StartPrepSDKCall(SDKCall_Player);
-	PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CTerrorPlayer::IsUseableEntity");
-	PrepSDKCall_AddParameter(SDKType_CBaseEntity, SDKPass_Plain);
-	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
-	PrepSDKCall_SetReturnInfo(SDKType_Bool, SDKPass_Plain);
-	if ((g_hIsUseableEntity = EndPrepSDKCall()) == null)
-		SetFailState("Failed to create SDKCall for CTerrorPlayer::IsUseableEntity signature!");
 
 	StartPrepSDKCall(SDKCall_Player);
 	PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CTerrorPlayer::FindUseEntity");
@@ -992,9 +968,6 @@ public void OnClientDisconnect(int iClient)
 
 void ResetClientPluginVariables(int iClient)
 {	
-	g_iPlayerVocalize_OrderTarget[iClient] = -1;
-	g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime();
-
 	g_bBotProcessing_IsProcessed[iClient] = false;
 
 	g_iSurvivorBot_TargetInfected[iClient] = -1;	
@@ -1005,19 +978,14 @@ void ResetClientPluginVariables(int iClient)
 	g_iSurvivorBot_ScavengeItem[iClient] = -1;
 	g_iSurvivorBot_DefibTarget[iClient] = -1;
 	g_iSurvivorBot_Grenade_ThrowTarget[iClient] = -1;
-	g_iSurvivorBot_ForceWeaponFire_Slot[iClient] = -1;
-	g_iSurvivorBot_HealTarget[iClient] = -1;
 	g_iSurvivorBot_MovePos_Priority[iClient] = 0;
 	
 	g_szSurvivorBot_MovePos_Name[iClient][0] = 0;
 
 	g_fSurvivorBot_TargetInfected_Distance[iClient] = -1.0;
-	g_fSurvivorBot_ForceApproachDist[iClient] = -1.0;
 	g_fSurvivorBot_MovePos_Tolerance[iClient] = -1.0;
 
-	g_bSurvivorBot_ForceWeaponFire[iClient] = false;
 	g_bSurvivorBot_ForceWeaponReload[iClient] = false;
-	g_bSurvivorBot_ForceThrowGrenade[iClient] = false;
 	g_bSurvivorBot_ForceSwitchWeapon[iClient] = false;
 	g_bSurvivorBot_ForceBash[iClient] = false;
 	g_bSurvivorBot_PreventFire[iClient] = false;
@@ -1034,12 +1002,9 @@ void ResetClientPluginVariables(int iClient)
 	g_fSurvivorBot_ChainsawHoldTime[iClient] = GetGameTime();
 	g_fSurvivorBot_NextMoveCommandTime[iClient] = GetGameTime() + BOT_CMD_MOVE_INTERVAL;
 	g_fSurvivorBot_ResetMovePosTime[iClient] = GetGameTime() + 1.0;
-	g_fSurvivorBot_ForceWeaponFire_Delay[iClient] = GetGameTime();
-	g_fSurvivorBot_ForceWeaponFire_Duration[iClient] = GetGameTime();
 	g_fSurvivorBot_LookPosition_Duration[iClient] = GetGameTime();
 	g_fSurvivorBot_NextPressAttackTime[iClient] = GetGameTime();
 	g_fSurvivorBot_MovePos_Duration[iClient] = GetGameTime();
-	g_fSurvivorBot_HealTargetResetTime[iClient] = -1.0;
 	g_fSurvivorBot_NextWeaponRangeSwitchTime[iClient] = GetGameTime();
 
 	SetVectorToZero(g_fSurvivorBot_Grenade_ThrowPos[iClient]);
@@ -1115,20 +1080,6 @@ void Event_OnPlayerUse(Event hEvent, const char[] szName, bool bBroadcast)
 
 	g_iSurvivorBot_ScavengeItem[iClient] = -1;
 	ClearMoveToPosition(iClient, "ScavengeItem");
-}
-
-void Event_OnHeal_Success(Event hEvent, const char[] szName, bool bBroadcast)
-{
-	int iClient = GetClientOfUserId(hEvent.GetInt("userid"));
-	g_iSurvivorBot_HealTarget[iClient] = -1;
-	g_fSurvivorBot_HealTargetResetTime[iClient] = -1.0;
-}
-
-void Event_OnGiveWeapon(Event hEvent, const char[] szName, bool bBroadcast)
-{
-	int iClient = GetClientOfUserId(hEvent.GetInt("giver"));
-	g_iSurvivorBot_HealTarget[iClient] = -1;
-	g_fSurvivorBot_HealTargetResetTime[iClient] = -1.0;
 }
 
 void Event_PlayerDeath(Event hEvent, const char[] szName, bool bBroadcast)
@@ -1230,7 +1181,7 @@ void Event_ChargeStart(Event hEvent, const char[] szName, bool bBroadcast)
 			fMovePos[2] = g_fClientAbsOrigin[i][2] + (fClientRight[2] * ((k == 1 ? 256.0 : -256.0) - fChargeHitDist));
 
 			iMoveArea = L4D_GetNearestNavArea(fMovePos);
-			if (iMoveArea > 0 && LBI_IsReachableNavArea(i, iMoveArea))
+			if (iMoveArea && LBI_IsReachableNavArea(i, iMoveArea))
 			{
 				LBI_GetClosestPointOnNavArea(iMoveArea, fMovePos, fMovePos);
 				float fMoveDist = GetClientTravelDistance(i, fMovePos);
@@ -1241,7 +1192,7 @@ void Event_ChargeStart(Event hEvent, const char[] szName, bool bBroadcast)
 				}
 			}
 
-			if (k == 2)FindCoverFromEntity(i, iCharger, 512.0);
+			if (k == 2)TakeCoverFromEntity(i, iCharger, 512.0);
 		}
 	}
 }
@@ -1308,12 +1259,12 @@ public Action OnPlayerRunCmd(int iClient, int &iButtons, int &iImpulse, float fV
 		g_iWeapon_Clip1[iWpnSlots[1]] = GetWeaponClip1(iWpnSlots[1]);
 	}
 	
-	if (g_bCutsceneIsPlaying || g_iClientNavArea[iClient] <= 0 || GetGameTime() <= g_fClient_ThinkFunctionDelay[iClient] || !IsFakeClient(iClient))
+	if (g_bCutsceneIsPlaying || !g_iClientNavArea[iClient] || GetGameTime() <= g_fClient_ThinkFunctionDelay[iClient] || !IsFakeClient(iClient))
 		return Plugin_Continue;
 
-	static ConVar bCvar_BotStop;
-	if (!bCvar_BotStop)bCvar_BotStop = FindConVar("sb_stop");
-	if (bCvar_BotStop.BoolValue)return Plugin_Continue;
+	static ConVar hCvar_BotsStop;
+	if (!hCvar_BotsStop)hCvar_BotsStop = FindConVar("sb_stop");
+	if (hCvar_BotsStop.BoolValue)return Plugin_Continue;
 
 	SurvivorBotThink(iClient, iButtons, iWpnSlots);
 
@@ -1351,6 +1302,13 @@ public void L4D_OnCThrowActivate_Post(int iAbility)
 public void L4D_TankRock_OnRelease_Post(int iTank, int iRock, const float fVecPos[3], const float fVecAng[3], const float fVecVel[3], const float fVecRot[3])
 {
 	if (IsValidClient(iTank))g_bInfectedBot_IsThrowing[iTank] = false;
+}
+
+stock void VScript_DebugDrawLine(float fStartPos[3], float fEndPos[3], int iColorR = 255, int iColorG = 255, int iColorB = 255, bool bZTest = false, float fDrawTime = 1.0)
+{
+	char szScriptCode[256]; FormatEx(szScriptCode, sizeof(szScriptCode), "DebugDrawLine(Vector(%f, %f, %f), Vector(%f, %f, %f), %i, %i, %i, %s, %f)",
+		fStartPos[0], fStartPos[1], fStartPos[2], fEndPos[0], fEndPos[1], fEndPos[2], iColorR, iColorG, iColorB, (bZTest ? "true" : "false"), fDrawTime);
+	L4D2_ExecVScriptCode(szScriptCode);
 }
 
 void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
@@ -1552,54 +1510,6 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 			iButtons &= ~IN_RELOAD;
 		}
 
-		if (g_bSurvivorBot_ForceWeaponFire[iClient])
-		{
-			int iWpnSlot = g_iSurvivorBot_ForceWeaponFire_Slot[iClient];
-			if (iWpnSlot != -1 && iWpnSlots[iWpnSlot] == -1)
-			{
-				g_bSurvivorBot_ForceWeaponFire[iClient] = false;
-				g_fSurvivorBot_ForceWeaponFire_Delay[iClient] = 0.0;
-				g_fSurvivorBot_ForceWeaponFire_Duration[iClient] = 0.0;
-				g_iSurvivorBot_ForceWeaponFire_Slot[iClient] = -1;
-			}
-			else
-			{
-				if (iWpnSlot != -1 && iCurWeapon != iWpnSlots[iWpnSlot])
-				{
-					g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-					SwitchWeaponSlot(iClient, iWpnSlot);
-				}
-
-				if (GetGameTime() > g_fSurvivorBot_ForceWeaponFire_Delay[iClient])
-				{
-					PressAttackButton(iClient, iButtons);
-					if (g_fSurvivorBot_ForceWeaponFire_Duration[iClient] <= 0.0 || GetGameTime() > g_fSurvivorBot_ForceWeaponFire_Duration[iClient])
-					{
-						g_bSurvivorBot_ForceWeaponFire[iClient] = false;
-						g_fSurvivorBot_ForceWeaponFire_Delay[iClient] = 0.0;
-						g_fSurvivorBot_ForceWeaponFire_Duration[iClient] = 0.0;
-						g_iSurvivorBot_ForceWeaponFire_Slot[iClient] = -1;
-					}
-				}
-			}
-		}
-
-		if (g_bSurvivorBot_ForceThrowGrenade[iClient])
-		{
-			if (GetGameTime() > g_fSurvivorBot_LookPosition_Duration[iClient] || iWpnSlots[2] == -1)
-			{
-				g_bSurvivorBot_ForceThrowGrenade[iClient] = false;
-			}
-			else if (iCurWeapon != iWpnSlots[2])
-			{
-				SwitchWeaponSlot(iClient, 2);
-			}
-			else
-			{
-				PressAttackButton(iClient, iButtons, 1.0);
-			}
-		}
-
 		if (!SurvivorBot_CanFreelyFireWeapon(iClient))
 		{
 			g_bSurvivorBot_PreventFire[iClient] = true;
@@ -1749,9 +1659,28 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				iButtons |= IN_SPEED;
 			}
 		}
-		else if (fTankDist <= (384.0*384.0) || (g_bInfectedBot_IsThrowing[iTankTarget] || fTankDist <= (768.0*768.0)) && IsVisibleEntity(iClient, iTankTarget, MASK_VISIBLE_AND_NPCS))
+		else 
 		{
-			LBI_CommandABot(iClient, 2, NULL_VECTOR, iTankTarget);
+			int iVictim = g_iInfectedBot_CurrentVictim[iTankTarget];
+			bool bTankVisible = IsVisibleEntity(iClient, iTankTarget, MASK_SHOT_HULL);
+			if (g_bInfectedBot_IsThrowing[iTankTarget] && bTankVisible && (iVictim == iClient || GetClientDistance(iClient, iVictim, true) <= (256.0*256.0)))
+			{
+				if (strcmp(g_szSurvivorBot_MovePos_Name[iClient], "GoToCover") != 0)
+				{
+					TakeCoverFromEntity(iClient, iTankTarget, 768.0);
+				}
+			}
+			else
+			{
+				if (!g_bInfectedBot_IsThrowing[iTankTarget] || !bTankVisible)
+				{
+					ClearMoveToPosition(iClient, "GoToCover");	
+				}
+				if (fTankDist <= (384.0*384.0) || fTankDist <= (768.0*768.0) && bTankVisible)
+				{
+					LBI_CommandABot(iClient, 2, NULL_VECTOR, iTankTarget);
+				}
+			}
 		}
 		/*else if (fTankDist <= (1024.0*1024.0))
 		{
@@ -1762,7 +1691,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				ClearMoveToPosition(iClient, "ApproachTank");
 				if (strcmp(g_szSurvivorBot_MovePos_Name[iClient], "GoToCover") != 0)
 				{
-					FindCoverFromEntity(iClient, iTankTarget, 768.0);
+					TakeCoverFromEntity(iClient, iTankTarget, 768.0);
 				}
 			}
 			else 
@@ -1790,9 +1719,9 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 			
 			if (g_bCvar_TankRock_ShootEnabled && SurvivorBot_AbleToShootWeapon(iClient) && (iCurWeapon != iWpnSlots[1] || !SurvivorHasMeleeWeapon(iClient)) && GetVectorDistance(g_fClientEyePos[iClient], fRockPos, true) <= (g_fCvar_TankRock_ShootRange*g_fCvar_TankRock_ShootRange) && !IsSurvivorBusy(iClient))
 			{
-				static ConVar cvarRockHealth;
-				if (!cvarRockHealth)cvarRockHealth = FindConVar("z_tank_throw_health");
-				if (cvarRockHealth.IntValue > 0 && HadVisualContactWithEntity(iClient, iTankRock, false, fRockPos))
+				static ConVar hCvar_RockHealth;
+				if (!hCvar_RockHealth)hCvar_RockHealth = FindConVar("z_tank_throw_health");
+				if (hCvar_RockHealth.IntValue > 0 && HadVisualContactWithEntity(iClient, iTankRock, false, fRockPos))
 				{
 					SnapViewToPosition(iClient, fRockPos);
 					PressAttackButton(iClient, iButtons);
@@ -1842,9 +1771,10 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				}
 			}
 
-			if (iWitchHarasser == iClient && !L4D_IsPlayerIncapacitated(iClient))
+			if (iWitchHarasser == iClient && fWitchDist <= (1024.0*1024.0) && !L4D_IsPlayerIncapacitated(iClient))
 			{
-				LBI_CommandABot(iClient, 2, NULL_VECTOR, iWitchTarget);
+				TryRetreatingFromEntity(iClient, iWitchTarget, 1024.0);
+				//LBI_CommandABot(iClient, 2, NULL_VECTOR, iWitchTarget);
 			}
 		}
 		else 
@@ -2047,7 +1977,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		}
 	}
 
-	if (g_bCvar_GrenadeThrow_Enabled && !g_bSurvivorBot_ForceThrowGrenade[iClient] && iWpnSlots[2] != -1 && (IsEntityExists(iInfectedTarget) || IsValidClient(iTankTarget)))
+	if (g_bCvar_GrenadeThrow_Enabled && iWpnSlots[2] != -1 && (IsEntityExists(iInfectedTarget) || IsValidClient(iTankTarget)))
 	{
 		float fThrowPosition[3];
 		int iThrowTarget = -1, iGrenadeType = SurvivorHasGrenade(iClient);
@@ -2089,7 +2019,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 				if (GetVectorDistance(g_fClientAbsOrigin[iClient], fMidPos, true) > (BOT_GRENADE_CHECK_RADIUS*BOT_GRENADE_CHECK_RADIUS))
 				{
-					float fTraceStart[3]; fTraceStart = fMidPos; fTraceStart[2] + 36.0;
+					float fTraceStart[3]; fTraceStart = fMidPos; fTraceStart[2] + HUMAN_HALF_HEIGHT;
 					float fAngleDown[3] = {90.0, 0.0, 0.0};
 					Handle hGroundCheck = TR_TraceRayFilterEx(fTraceStart, fAngleDown, MASK_PLAYERSOLID, RayType_Infinite, Base_TraceFilter);
 					float fTrHitPos[3]; TR_GetEndPosition(fTrHitPos, hGroundCheck); delete hGroundCheck;
@@ -2105,7 +2035,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 			if (iCurWeapon == iWpnSlots[2])
 			{
 				int iThrowArea = L4D_GetNearestNavArea(fThrowPosition, 1024.0, true, false, _, 3);
-				if (iThrowArea > 0)L4D_FindRandomSpot(iThrowArea, fThrowPosition);
+				if (iThrowArea)L4D_FindRandomSpot(iThrowArea, fThrowPosition);
 
 				float fThrowVel[3]; CalculateTrajectory(g_fClientEyePos[iClient], fThrowPosition, 700.0, 0.4, fThrowVel);
 				AddVectors(g_fClientEyePos[iClient], fThrowVel, g_fSurvivorBot_Grenade_AimPos[iClient]);
@@ -2151,45 +2081,6 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 	if (L4D_IsPlayerIncapacitated(iClient))
 		return;
-
-	int iHealTarget = g_iSurvivorBot_HealTarget[iClient];
-	if (IsValidClient(iHealTarget))
-	{
-		if (g_fSurvivorBot_HealTargetResetTime[iClient] == -1.0)g_fSurvivorBot_HealTargetResetTime[iClient] = GetGameTime() + 20.0;
-
-		if (GetGameTime() <= g_fSurvivorBot_HealTargetResetTime[iClient] && IsPlayerAlive(iHealTarget) && GetClientTeam(iHealTarget) == 2 && 
-			(iWpnSlots[3] != -1 && SurvivorHasHealthKit(iClient) == 1 || iWpnSlots[4] != -1) && 
-			!L4D_IsPlayerIncapacitated(iHealTarget) && !L4D_IsPlayerPinned(iHealTarget)
-		)
-		{
-			int iHealSlot = (iWpnSlots[3] != -1 ? 3 : 4);
-			float fHealDist = (iHealSlot == 3 ? 70.0 : 160.0);
-			if (iCurWeapon != iWpnSlots[iHealSlot])
-			{
-				SwitchWeaponSlot(iClient, iHealSlot);
-			}
-			else
-			{ 
-				if (GetGameTime() > GetWeaponNextPrimaryFireTime(iCurWeapon) && GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iHealTarget], true) <= (fHealDist*fHealDist) && IsVisibleEntity(iClient, iHealTarget, MASK_SHOT_HULL))
-				{
-					SnapViewToPosition(iClient, g_fClientCenteroid[iHealTarget]);
-					if (L4D2_GetPlayerUseAction(iClient) == L4D2UseAction_Healing || GetClientLookTarget(iClient) == iHealTarget)
-					{
-						iButtons |= IN_ATTACK2; 
-					}
-				}
-				else if (LBI_IsReachableEntity(iClient, iHealTarget))
-				{
-					SetMoveToPosition(iClient, g_fClientAbsOrigin[iHealTarget], 2, "HealTeammate", _, (fHealDist - 32.0));
-				}
-			}
-		}
-		else
-		{
-			g_iSurvivorBot_HealTarget[iClient] = -1;
-			g_fSurvivorBot_HealTargetResetTime[iClient] = -1.0;
-		}
-	}
 
 	if (LBI_IsSurvivorBotAvailable(iClient))
 	{
@@ -2279,9 +2170,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 	static float fRndSearchTime;
 	if (g_iCvar_ItemScavenge_Items != 0 && GetGameTime() > g_fSurvivorBot_NextScavengeItemScanTime[iClient])
 	{
-		g_iSurvivorBot_ScavengeItem[iClient] = CheckForItemsToScavenge(iClient);
-		g_fSurvivorBot_ForceApproachDist[iClient] = -1.0;
-		
+		g_iSurvivorBot_ScavengeItem[iClient] = CheckForItemsToScavenge(iClient);		
 		fRndSearchTime = GetGameTime() + GetRandomFloat(0.5, 1.5);
 		g_fSurvivorBot_NextScavengeItemScanTime[iClient] = fRndSearchTime;
 	}
@@ -2347,8 +2236,8 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 								{
 									bIncreasedTime = true;
 									
-									static ConVar hCvarGasUseTime; if (!hCvarGasUseTime)hCvarGasUseTime = FindConVar("gas_can_use_duration");
-									float fAddTime = (hCvarGasUseTime.FloatValue);
+									static ConVar hCvar_GasUseTime; if (!hCvar_GasUseTime)hCvar_GasUseTime = FindConVar("gas_can_use_duration");
+									float fAddTime = (hCvar_GasUseTime.FloatValue);
 									if (strcmp(szScavengeItem, "func_button_timed") == 0)fAddTime = float(GetEntProp(iScavengeItem, Prop_Data, "m_nUseTime"));									
 									if (L4D2_IsUnderAdrenalineEffect(iClient))fAddTime *= 0.5;
 
@@ -2362,15 +2251,13 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				{
 					float fScavengePos[3]; 
 					fScavengePos = fItemPos;
-
-					float fForceDist = g_fSurvivorBot_ForceApproachDist[iClient];
-					float fMaxDist = (fForceDist == -1.0 ? g_fCvar_ItemScavenge_ApproachVisibleRange : fForceDist);
 					
 					int iScavengeArea = L4D_GetNearestNavArea(fItemPos, _, true, true, false);
-					if (iScavengeArea > 0)
+					float fMaxDist = g_fCvar_ItemScavenge_ApproachVisibleRange;
+					if (iScavengeArea)
 					{										
 						LBI_GetClosestPointOnNavArea(iScavengeArea, fItemPos, fScavengePos);
-						if (fForceDist != fMaxDist && !LBI_IsNavAreaPartiallyVisible(iScavengeArea, g_fClientEyePos[iClient], iClient))
+						if (!LBI_IsNavAreaPartiallyVisible(iScavengeArea, g_fClientEyePos[iClient], iClient))
 						{
 							fMaxDist = g_fCvar_ItemScavenge_ApproachRange;
 						}
@@ -2456,23 +2343,7 @@ Action OnSurvivorSwitchWeapon(int iClient, int iWeapon)
 		}
 	}
 
-	if (g_bSurvivorBot_ForceThrowGrenade[iClient] && iCurWeapon == GetClientWeaponInventory(iClient, 2))
-	{
-		return Plugin_Handled;
-	}
-
 	if (IsEntityExists(g_iSurvivorBot_DefibTarget[iClient]) && iCurWeapon == GetClientWeaponInventory(iClient, 3) && SurvivorHasHealthKit(iClient) == 2)
-	{
-		return Plugin_Handled;
-	}
-
-	int iForceSlot = g_iSurvivorBot_ForceWeaponFire_Slot[iClient];
-	if (iForceSlot != -1 && GetClientWeaponInventory(iClient, iForceSlot) != -1 && iWeapon != GetClientWeaponInventory(iClient, iForceSlot))
-	{
-		return Plugin_Handled;
-	}
-
-	if (IsValidClient(g_iSurvivorBot_HealTarget[iClient]) && (iCurWeapon == GetClientWeaponInventory(iClient, 3) || iCurWeapon == GetClientWeaponInventory(iClient, 4)))
 	{
 		return Plugin_Handled;
 	}
@@ -2521,7 +2392,7 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 	for (int i = 0; i < 10; i++)
 	{
 		LBI_TryGetPathableLocationWithin(iClient, 200.0 + (50.0 * i), fPathPos);
-		if (LBI_IsDamagingPosition(fPathPos))continue;
+		if (!IsValidVector(fPathPos) || LBI_IsDamagingPosition(fPathPos))continue;
 		
 		fCurDist = GetClientTravelDistance(iClient, fPathPos);
 		if (fLastDist != -1.0 && fCurDist >= fLastDist)continue;
@@ -2537,73 +2408,71 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 	return Plugin_Continue; 
 }
 
-bool FindCoverFromPosition(int iBot, float fPosition[3], float fScanDist = 384.0)
+bool TakeCoverFromPosition(int iClient, float fPosition[3], float fSearchDist = 384.0)
 {
-	float fDot, fTravelDist, fPathPos[3], fPathOffset[3], fMoveDir[3], fMoveFwd[3];
-	for (int i = 0; i < 8; i++)
+	float fSelfToPos[3]; MakeVectorFromPoints(g_fClientEyePos[iClient], fPosition, fSelfToPos);
+	NormalizeVector(fSelfToPos, fSelfToPos);
+
+	float fDot, fPathPos[3], fPathOffset[3], fSelfToMovePos[3];
+	for (int i = 0; i < 10; i++)
 	{
-		LBI_TryGetPathableLocationWithin(iBot, fScanDist, fPathPos);
-		if (LBI_IsDamagingPosition(fPathPos))continue;
+		LBI_TryGetPathableLocationWithin(iClient, fSearchDist, fPathPos);
+		if (!IsValidVector(fPathPos) || LBI_IsDamagingPosition(fPathPos))continue;
 
-		fPathOffset = fPathPos; fPathOffset[2] + 36.0;
+		fPathOffset = fPathPos; fPathOffset[2] + HUMAN_HALF_HEIGHT;
 
-		MakeVectorFromPoints(fPathOffset, fPosition, fMoveDir);
-		NormalizeVector(fMoveDir, fMoveDir);
-		
-		GetAngleVectors(fMoveDir, fMoveFwd, NULL_VECTOR, NULL_VECTOR);
-		NormalizeVector(fMoveFwd, fMoveFwd);
-		
-		fDot = GetVectorDotProduct(fMoveDir, fMoveFwd);
-		if (fDot > 0.33 || GetVectorVisible(fPosition, fPathOffset))continue;
+		MakeVectorFromPoints(g_fClientEyePos[iClient], fPathPos, fSelfToMovePos);
+		NormalizeVector(fSelfToMovePos, fSelfToMovePos);
 
-		fTravelDist = GetClientTravelDistance(iBot, fPathPos);
-		if (fTravelDist == -1.0 || fTravelDist > (fScanDist * 1.25))continue;
+		fDot = GetVectorDotProduct(fSelfToPos, fSelfToMovePos);
+		if (fDot > 0.125 || GetVectorVisible(fPosition, fPathOffset))continue;
 
-		SetMoveToPosition(iBot, fPathPos, 3, "GoToCover");
+		SetMoveToPosition(iClient, fPathPos, 3, "GoToCover");
 		return true;
 	}
-
-	/*int iNavArea = 0;
-	float fDot, fTravelDist;
-	float fRandPos[3], fMoveDir[3], fMoveFwd[3];
-	for (int i = 0; i < RoundFloat(fScanDist); i++)
-	{
-		fRandPos[0] = g_fClientAbsOrigin[iBot][0] + GetRandomFloat(-fScanDist, fScanDist);
-		fRandPos[1] = g_fClientAbsOrigin[iBot][1] + GetRandomFloat(-fScanDist, fScanDist);
-		fRandPos[2] = g_fClientAbsOrigin[iBot][2];
-
-		iNavArea = L4D_GetNearestNavArea(fRandPos);
-		if (iNavArea <= 0 || !LBI_IsReachableNavArea(iBot, iNavArea))continue;
-
-		LBI_GetClosestPointOnNavArea(iNavArea, fRandPos, fRandPos);
-
-		fRandPos[2] += 36.0;
-
-		MakeVectorFromPoints(fRandPos, fPosition, fMoveDir);
-		NormalizeVector(fMoveDir, fMoveDir);
-
-		GetAngleVectors(fMoveDir, fMoveFwd, NULL_VECTOR, NULL_VECTOR);
-		NormalizeVector(fMoveFwd, fMoveFwd);
-
-		fDot = RadToDeg(ArcCosine(GetVectorDotProduct(fMoveDir, fMoveFwd)));
-
-		fTravelDist = GetClientTravelDistance(iBot, fRandPos);
-		if (fTravelDist != -1.0 && fTravelDist <= fScanDist && fDot >= 120.0 && !GetVectorVisible(fPosition, fRandPos))
-		{
-			SetMoveToPosition(iBot, fRandPos, 3, "GoToCover");
-			return true;
-		}
-	}*/
 
 	return false;
 }
 
-bool FindCoverFromEntity(int iBot, int iEntity, float fScanDist = 384.0)
+bool TakeCoverFromEntity(int iClient, int iEntity, float fSearchDist = 384.0)
 {
 	float fEntityPos[3];
 	if (IsValidClient(iEntity))GetClientEyePosition(iEntity, fEntityPos);
 	else GetEntityCenteroid(iEntity, fEntityPos);
-	return (FindCoverFromPosition(iBot, fEntityPos, fScanDist));
+	return (TakeCoverFromPosition(iClient, fEntityPos, fSearchDist));
+}
+
+bool TryRetreatingFromEntity(int iClient, int iEntity, float fSearchDist = 1024.0)
+{
+	if (GetGameTime() <= g_fSurvivorBot_RetreatPosSearchTime[iClient])
+		return true;
+
+	float fEntityPos[3]; GetEntityAbsOrigin(iEntity, fEntityPos);
+	float fEntityDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fEntityPos, true);
+
+	float fSelfToPos[3]; MakeVectorFromPoints(g_fClientAbsOrigin[iClient], fEntityPos, fSelfToPos);
+	NormalizeVector(fSelfToPos, fSelfToPos);
+
+	float fDot, fPathPos[3], fPathOffset[3], fSelfToMovePos[3];
+	for (int i = 0; i < 10; i++)
+	{
+		LBI_TryGetPathableLocationWithin(iClient, fSearchDist, fPathPos);
+		if (!IsValidVector(fPathPos) || GetVectorDistance(fEntityPos, fPathPos, true) < fEntityDist || LBI_IsDamagingPosition(fPathPos))continue;
+
+		fPathOffset = fPathPos; fPathOffset[2] + HUMAN_HALF_HEIGHT;
+
+		MakeVectorFromPoints(g_fClientEyePos[iClient], fPathPos, fSelfToMovePos);
+		NormalizeVector(fSelfToMovePos, fSelfToMovePos);
+
+		fDot = GetVectorDotProduct(fSelfToPos, fSelfToMovePos);
+		if (fDot > 0.25)continue;
+
+		SetMoveToPosition(iClient, fPathPos, 3, "RetreatFromEntity");
+		g_fSurvivorBot_RetreatPosSearchTime[iClient] = GetGameTime() + GetRandomFloat(1.5, 3.0);
+		return true;
+	}
+
+	return false;
 }
 
 void ClearMoveToPosition(int iClient, const char[] szCheckName = "")
@@ -2672,188 +2541,6 @@ void LBI_TryGetPathableLocationWithin(int iClient, float fRadius, float fBuffer[
 	ReplaceString(szBuffer, sizeof(szBuffer), szCoordinate, "");
 
 	fBuffer[2] = StringToFloat(szBuffer);
-}
-
-public Action OnClientSayCommand(int iClient, const char[] sCommand, const char[] sArgs)
-{
-	if (!IsPlayerSurvivor(iClient) || IsFakeClient(iClient) || strcmp(sCommand, "say") != 0 && strcmp(sCommand, "say_team") != 0)
-		return Plugin_Continue;
-
-	char sBotName[MAX_NAME_LENGTH];
-	char sBotOrder[64], sBotOrder2[64], sFullArg[64];
-	bool bAllBots = (strncmp(sArgs, "bots", 4) == 0);
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsPlayerSurvivor(i))
-			continue;
-
-		if (bAllBots)
-		{
-			strcopy(sFullArg, sizeof(sFullArg), sArgs[5]);
-			BreakString(sFullArg, sBotOrder, sizeof(sBotOrder));
-			strcopy(sBotOrder2, sizeof(sBotOrder2), sArgs[strlen(sBotOrder) + 6]);
-			ExecuteBotOrder(i, iClient, sBotOrder, sBotOrder2);
-			continue;
-		}
-
-		GetClientName(i, sBotName, sizeof(sBotName));
-		if (StrContains(sArgs, sBotName, false) != -1)
-		{
-			strcopy(sFullArg, sizeof(sFullArg), sArgs[strlen(sBotName) + 1]);
-			BreakString(sFullArg, sBotOrder, sizeof(sBotOrder));
-			strcopy(sBotOrder2, sizeof(sBotOrder2), sArgs[strlen(sBotName) + strlen(sBotOrder) + 2]);
-			ExecuteBotOrder(i, iClient, sBotOrder, sBotOrder2);
-			break;
-		}
-	}
-
-	return Plugin_Continue;
-}
-
-void ExecuteBotOrder(int iBot, int iClient, const char[] sCommand, const char[] sArgument)
-{
-	if (sCommand[0] == 0)
-		return;
-
-	if (strcmp(sCommand, "heal") == 0)
-	{
-		if (SurvivorHasHealthKit(iBot) == 1)
-		{
-			g_bSurvivorBot_ForceWeaponFire[iBot] = true;
-			g_iSurvivorBot_ForceWeaponFire_Slot[iBot] = 3;
-			g_fSurvivorBot_ForceWeaponFire_Delay[iBot] = GetGameTime() + 1.0;
-			g_fSurvivorBot_ForceWeaponFire_Duration[iBot] = GetGameTime() + FindConVar("first_aid_kit_use_duration").FloatValue + 1.0;
-		}
-		else if (GetClientWeaponInventory(iBot, 4) != -1)
-		{
-			g_bSurvivorBot_ForceWeaponFire[iBot] = true;
-			g_iSurvivorBot_ForceWeaponFire_Slot[iBot] = 4;
-			g_fSurvivorBot_ForceWeaponFire_Delay[iBot] = GetGameTime() + 1.0;
-			g_fSurvivorBot_ForceWeaponFire_Duration[iBot] = GetGameTime() + 1.5;
-		}
-		return;
-	}
-
-	float fClientAimPos[3]; 
-	GetClientAimPosition(iClient, fClientAimPos);
-
-	if ((strcmp(sCommand, "fire") == 0 || strcmp(sCommand, "shoot") == 0 || strcmp(sCommand, "attack") == 0 || (strcmp(sCommand, "throw") == 0 || strcmp(sCommand, "yeet") == 0) && IsSurvivorCarryingProp(iBot)) && (IsWeaponSlotActive(iBot, 0) || IsWeaponSlotActive(iBot, 1) && (!SurvivorHasMeleeWeapon(iBot) || GetVectorDistance(g_fClientEyePos[iBot], fClientAimPos, true) <= (g_fCvar_ImprovedMelee_AttackRange*g_fCvar_ImprovedMelee_AttackRange))))
-	{
-		float fAttackDuration = StringToFloat(sArgument);
-		fAttackDuration = (fAttackDuration > 0.0 ? fAttackDuration : 0.5);
-
-		BotLookAtPosition(iBot, fClientAimPos, fAttackDuration);
-		g_bSurvivorBot_ForceWeaponFire[iBot] = true;
-		g_fSurvivorBot_ForceWeaponFire_Delay[iBot] = GetGameTime();
-		g_fSurvivorBot_ForceWeaponFire_Duration[iBot] = GetGameTime() + fAttackDuration;
-		
-		return;
-	}
-
-	if (strcmp(sCommand, "scavenge") == 0)
-	{
-		int iScavengeItem = -1;
-		
-		if (sArgument[0] != 0)
-		{
-			float fWepDist = -1.0;
-			float fLastDist = g_fCvar_ItemScavenge_ApproachVisibleRange;
-			char szWepClass[64];
-			for (int i = 0; i < MAXENTITIES; i++)
-			{
-				if (IsEntityWeapon(i) && ItemSpawnerHasEnoughItems(i) > 0 && !IsValidClient(GetEntityOwner(i)))
-				{ 
-					fWepDist = GetEntityDistance(iBot, i, true);
-					GetWeaponClassname(i, szWepClass, sizeof(szWepClass));
-					if (StrContains(szWepClass, sArgument, false) != -1 && fWepDist < fLastDist)
-					{
-						iScavengeItem = i;
-						fLastDist = fWepDist;
-					}
-				}
-			}
-		}
-		else 
-		{
-			int iAimTarget = LBI_FindUseEntity(iClient);
-			if (!IsEntityExists(iAimTarget))iAimTarget = GetClientAimTarget(iClient, false);
-			if (IsEntityWeapon(iAimTarget) && ItemSpawnerHasEnoughItems(iAimTarget) > 0 && !IsValidClient(GetEntityOwner(iAimTarget)))
-			{
-				iScavengeItem = iAimTarget;
-			}
-		}
-
-		if (iScavengeItem != -1)
-		{
-			float fTravelDist = GetClientEntityTravelDistance(iBot, iScavengeItem);
-			if (fTravelDist != -1.0 && fTravelDist <= g_fCvar_ItemScavenge_ApproachVisibleRange)
-			{
-				float fReachTime = (fTravelDist / GetClientMaxSpeed(iBot));
-				if (fReachTime < 1.0)fReachTime = 1.0;
-
-				g_fSurvivorBot_NextScavengeItemScanTime[iBot] = GetGameTime() + fReachTime + 2.5;
-				g_iSurvivorBot_ScavengeItem[iBot] = iScavengeItem;
-			}
-		}
-
-		return;
-	}
-
-	if (strcmp(sCommand, "throw") == 0 && !IsSurvivorCarryingProp(iBot) && GetClientWeaponInventory(iBot, 2) != -1)
-	{		
-		float fThrowPos[3], fThrowVel[3];
-		CalculateTrajectory(g_fClientEyePos[iBot], fClientAimPos, 700.0, 0.4, fThrowVel);
-		AddVectors(g_fClientEyePos[iBot], fThrowVel, fThrowPos);
-
-		BotLookAtPosition(iBot, fThrowPos, 5.0);
-		g_bSurvivorBot_ForceThrowGrenade[iBot] = true;
-
-		return;
-	}
-
-	if (strcmp(sCommand, "move") == 0)
-	{
-		int iNavArea = L4D_GetNearestNavArea(fClientAimPos);
-		if (iNavArea <= 0)return;
-
-		float fMovePos[3]; LBI_GetClosestPointOnNavArea(iNavArea, fClientAimPos, fMovePos);
-		float fTravelDist = GetClientTravelDistance(iBot, fClientAimPos);
-		if (fTravelDist == -1.0 || fTravelDist > 2048.0 || LBI_IsDamagingPosition(fClientAimPos))return;
-
-		SetMoveToPosition(iBot, fMovePos, 3, "CommandMove");
-		return;
-	}
-
-	if (strcmp(sCommand, "drop") == 0 || IsSurvivorCarryingProp(iBot))
-	{
-		g_bSurvivorBot_ForceSwitchWeapon[iBot] = true;
-		for (int i = 0; i <= 5; i++)
-		{
-			SwitchWeaponSlot(iBot, i);
-			if (L4D_GetPlayerCurrentWeapon(iBot) == GetClientWeaponInventory(iBot, i))
-			{
-				g_bSurvivorBot_ForceSwitchWeapon[iBot] = false;
-				break;
-			}
-		}
-		return;
-	}
-	
-	if (strcmp(sCommand, "stop") == 0)
-	{
-		g_bSurvivorBot_ForceWeaponFire[iBot] = false;
-		g_fSurvivorBot_ForceWeaponFire_Delay[iBot] = 0.0;
-		g_fSurvivorBot_ForceWeaponFire_Duration[iBot] = 0.0;
-		g_iSurvivorBot_ForceWeaponFire_Slot[iBot] = -1;
-
-		g_bSurvivorBot_ForceThrowGrenade[iBot] = false;
-
-		SetVectorToZero(g_fSurvivorBot_LookPosition[iBot]);
-		g_fSurvivorBot_LookPosition_Duration[iBot] = GetGameTime();
-
-		ClearMoveToPosition(iBot);
-		return;
-	}
 }
 
 bool SurvivorBot_IsTargetShootable(int iClient, int iTarget, int iCurWeapon, float fAimPos[3])
@@ -3095,12 +2782,11 @@ int CalculateGrenadeThrowInfectedCount()
 	return iFinalCount;
 }
 
-static ConVar g_hCvarItRange;
+static ConVar g_hCvar_ItRange;
 
 bool CheckCanThrowGrenade(int iClient, int iTarget, float fClientPos[3], float fThrowPos[3], bool bTeammateNearThrowArea, bool bIsThrowTargetTank)
 {
-	if (!g_hCvarItRange)
-		g_hCvarItRange = FindConVar("z_notice_it_range");
+	if (!g_hCvar_ItRange) g_hCvar_ItRange = FindConVar("z_notice_it_range");
 
 	if (g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.33))
 		return false;
@@ -3165,7 +2851,7 @@ bool CheckCanThrowGrenade(int iClient, int iTarget, float fClientPos[3], float f
 			if (GetGameTime() <= g_fEntity_CoveredInVomitTime[iTarget])
 				return false;
 
-			if (GetInfectedCount(iTarget, g_hCvarItRange.FloatValue, 10, _, false) < 10)
+			if (GetInfectedCount(iTarget, g_hCvar_ItRange.FloatValue, 10, _, false) < 10)
 				return false;
 		}
 
@@ -3182,7 +2868,7 @@ bool CheckCanThrowGrenade(int iClient, int iTarget, float fClientPos[3], float f
 			return false;
 
 		int iChaseEnt = INVALID_ENT_REFERENCE;
-		float fItRange = g_hCvarItRange.FloatValue;
+		float fItRange = g_hCvar_ItRange.FloatValue;
 		while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "info_goal_infected_chase")) != INVALID_ENT_REFERENCE)
 		{
 			if (GetEntityDistance(iChaseEnt, iTarget, true) > (fItRange*fItRange))continue;
@@ -3211,8 +2897,7 @@ bool CheckCanThrowGrenade(int iClient, int iTarget, float fClientPos[3], float f
 
 bool CheckIsUnableToThrowGrenade(int iClient, int iTarget, float fClientPos[3], float fThrowPos[3], bool bTeammateNearThrowArea, bool bIsThrowTargetTank)
 {
-	if (!g_hCvarItRange)
-		g_hCvarItRange = FindConVar("z_notice_it_range");
+	if (!g_hCvar_ItRange)g_hCvar_ItRange = FindConVar("z_notice_it_range");
 
 	int iActiveGrenades = (GetSurvivorTeamActiveItemCount("weapon_pipe_bomb") + GetSurvivorTeamActiveItemCount("weapon_molotov") + GetSurvivorTeamActiveItemCount("weapon_vomitjar"));
 	if (iActiveGrenades > 1)
@@ -3243,7 +2928,7 @@ bool CheckIsUnableToThrowGrenade(int iClient, int iTarget, float fClientPos[3], 
 			if (GetGameTime() <= g_fEntity_CoveredInVomitTime[iTarget])
 				return true;
 
-			if (GetInfectedCount(iTarget, g_hCvarItRange.FloatValue, 10, _, false) < 10)
+			if (GetInfectedCount(iTarget, g_hCvar_ItRange.FloatValue, 10, _, false) < 10)
 				return true;
 		}
 
@@ -3260,7 +2945,7 @@ bool CheckIsUnableToThrowGrenade(int iClient, int iTarget, float fClientPos[3], 
 			return true;
 
 		int iChaseEnt = INVALID_ENT_REFERENCE;
-		float fItRange = g_hCvarItRange.FloatValue;
+		float fItRange = g_hCvar_ItRange.FloatValue;
 		while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "info_goal_infected_chase")) != INVALID_ENT_REFERENCE)
 		{
 			if (GetEntityDistance(iChaseEnt, iTarget, true) > (fItRange*fItRange))continue;
@@ -3369,8 +3054,8 @@ bool PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 		if (g_bSurvivorBot_PreventFire[iClient] || !SurvivorBot_CanFreelyFireWeapon(iClient))
 			return false;
 
-		static ConVar cvarDontShoot; if (!cvarDontShoot)cvarDontShoot = FindConVar("sb_dont_shoot");
-		if (cvarDontShoot.BoolValue)return false;
+		static ConVar hCvar_BotsDontShoot; if (!hCvar_BotsDontShoot)hCvar_BotsDontShoot = FindConVar("sb_dont_shoot");
+		if (hCvar_BotsDontShoot.BoolValue)return false;
 	}
 
 	char szClassname[64];
@@ -4058,7 +3743,7 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 				if (bCheckIsVisible && fDistance > g_fCvar_ItemScavenge_ApproachRange)
 				{ 
 					iNavArea = L4D_GetNearestNavArea(fEntityPos, _, true, true, false);
-					if (iNavArea > 0 && !LBI_IsNavAreaPartiallyVisible(iNavArea, g_fClientEyePos[iClient], iClient))
+					if (iNavArea && !LBI_IsNavAreaPartiallyVisible(iNavArea, g_fClientEyePos[iClient], iClient))
 					{
 						fCheckDist = g_fCvar_ItemScavenge_ApproachRange;
 					}
@@ -4869,6 +4554,11 @@ bool HadVisualContactWithEntity(int iClient, int iEntity, bool bFOVState = true,
 	return (iState == 2);
 }
 
+stock float ClampFloat(float fValue, float fMin, float fMax)
+{
+	return (fValue > fMax) ? fMax : ((fValue < fMin) ? fMin : fValue);
+}
+
 int GetClosestInfected(int iClient, float fDistance = -1.0)
 {
 	int iCloseInfected = -1;
@@ -5407,7 +5097,7 @@ void LBI_GetNavAreaCenter(int iNavArea, float fResult[3])
 
 int LBI_GetNavAreaParent(int iNavArea)
 {
-	if (iNavArea <= 0)return 0;
+	if (!iNavArea)return 0;
 	return LoadFromAddress(view_as<Address>(iNavArea) + view_as<Address>(g_iNavArea_Parent), NumberType_Int32);
 }
 
@@ -5464,7 +5154,7 @@ void LBI_GetNavAreaCorner(int iNavArea, int iCorner, float fResult[3])
 
 bool LBI_IsDamagingNavArea(int iNavArea, bool bIgnoreWitches = false)
 {
-	if (iNavArea <= 0)return false;
+	if (!iNavArea)return false;
 	
 	int iTickCount = LoadFromAddress(view_as<Address>(iNavArea) + view_as<Address>(g_iNavArea_DamagingTickCount), NumberType_Int32);
 	if (GetGameTickCount() <= iTickCount)
@@ -5533,62 +5223,87 @@ float LBI_GetNavAreaZ(int iNavArea, float x, float y)
 	return fNorthZ + v * (fSouthZ - fSouthZ);
 }
 
-float ClampFloat(float fValue, float fMin, float fMax)
-{
-	return (fValue > fMax) ? fMax : ((fValue < fMin) ? fMin : fValue);
-}
-
-float fsel(float fComparand, float fValGE, float fLT)
+stock float fsel(float fComparand, float fValGE, float fLT)
 {
 	return (fComparand >= 0.0 ? fValGE : fLT);
 }
 
 bool LBI_IsNavAreaPartiallyVisible(int iNavArea, const float fEyePos[3], int iIgnoreEntity = -1)
 {
-	float fOffset = 27.0;
-	float fNavCenter[3];
-	LBI_GetNavAreaCenter(iNavArea, fNavCenter);
-	fNavCenter[2] += fOffset;
-
-	Handle hResult = TR_TraceRayFilterEx(fEyePos, fNavCenter, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, CTraceFilterNoNPCsOrPlayer, iIgnoreEntity);
-	if (TR_GetFraction(hResult) == 1.0)
+	float fOffset = (0.75 * HUMAN_HEIGHT);
+	
+	float fCenter[3]; LBI_GetNavAreaCenter(iNavArea, fCenter);
+	fCenter[2] += fOffset;
+	
+	Handle hResult = TR_TraceRayFilterEx(fEyePos, fCenter, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, CTraceFilterNoNPCsOrPlayer, iIgnoreEntity);
+	if (TR_GetFraction(hResult) >= 1.0)
 	{
 		delete hResult;
 		return true;
 	}
+	delete hResult;
 
 	float fEyeToCenter[3];
-	MakeVectorFromPoints(fEyePos, fNavCenter, fEyeToCenter);
+	MakeVectorFromPoints(fEyePos, fCenter, fEyeToCenter);
 	NormalizeVector(fEyeToCenter, fEyeToCenter);
 
-	float fCorner[3];
-	float fEyeToCorner[3];
-	for (int i = 0; i < 4; i++)
+	static ConVar hCvar_PotVisDotTolerance;
+	if (!hCvar_PotVisDotTolerance)hCvar_PotVisDotTolerance = FindConVar("nav_potentially_visible_dot_tolerance");
+	float fAngleTolerance = hCvar_PotVisDotTolerance.FloatValue;
+
+	float fCorner[3], fEyeToCorner[3];
+	for (int i = 0; i < 4; ++i)
 	{
 		LBI_GetNavAreaCorner(iNavArea, i, fCorner);
 		fCorner[2] += fOffset;
 
 		MakeVectorFromPoints(fEyePos, fCorner, fEyeToCorner);
 		NormalizeVector(fEyeToCorner, fEyeToCorner);
-		if (GetVectorDotProduct(fEyeToCorner, fEyeToCenter) < 0.98)
+		if (GetVectorDotProduct(fEyeToCorner, fEyeToCenter) >= fAngleTolerance)
+		{
+			continue;
+		}
+
+		fCorner[2] += fOffset;
+		hResult = TR_TraceRayFilterEx(fEyePos, fCorner, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, CTraceFilterNoNPCsOrPlayer, iIgnoreEntity);
+		if (TR_GetFraction(hResult) >= 1.0)
 		{
 			delete hResult;
-			hResult = TR_TraceRayFilterEx(fEyePos, fCorner, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, CTraceFilterNoNPCsOrPlayer, iIgnoreEntity);
-			if (TR_GetFraction(hResult) == 1.0)
-			{
-				delete hResult;
-				return true;
-			}
+			return true;
 		}
+		delete hResult;
 	}
 
-	delete hResult;
 	return false;
 }
 
 bool CTraceFilterNoNPCsOrPlayer(int iEntity, int iContentsMask, int iIgnore)
 {
-	return (iEntity != iIgnore && !IsValidClient(iEntity));
+	if (iEntity == 0 || IsValidClient(iEntity))
+		return true;
+
+	char szClassname[64]; GetEntityClassname(iEntity, szClassname, sizeof(szClassname));
+	if (strncmp(szClassname, "func_door", 9) == 0 || strncmp(szClassname, "prop_door", 9) == 0)
+		return false;
+
+	if (strcmp(szClassname, "func_brush") == 0)
+	{
+		int iSolidity = GetEntProp(iEntity, Prop_Data, "m_iSolidity");
+		return (iSolidity == 2);
+	}
+
+	if ((strcmp(szClassname, "func_breakable_surf") == 0 || strcmp(szClassname, "func_breakable") == 0 && GetEntityHealth(iEntity) > 0) && GetEntProp(iEntity, Prop_Data, "m_takedamage") == 2)
+		return false;
+
+	if (strcmp(szClassname, "func_playerinfected_clip") == 0)
+		return false;
+
+	static ConVar hCvar_SolidProps;
+	if (!hCvar_SolidProps)hCvar_SolidProps = FindConVar("nav_solid_props");
+	if (hCvar_SolidProps.BoolValue && strncmp(szClassname, "prop_", 5) == 0)
+		return false;
+
+	return (iEntity != iIgnore);
 }
 
 bool LBI_IsPositionInsideCheckpoint(const float fPos[3])
@@ -5606,10 +5321,10 @@ bool LBI_IsPositionInsideCheckpoint(const float fPos[3])
 float GetClientTravelDistance(int iClient, float fGoalPos[3])
 {
 	int iStartArea = g_iClientNavArea[iClient];
-	if (iStartArea <= 0)return -1.0;
+	if (!iStartArea)return -1.0;
 
 	int iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true, GetClientTeam(iClient));
-	if (iGoalArea <= 0)return -1.0;
+	if (!iGoalArea)return -1.0;
 
 	if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), 0.0, GetClientTeam(iClient), false))
 	{
@@ -5617,7 +5332,7 @@ float GetClientTravelDistance(int iClient, float fGoalPos[3])
 	}
 
 	int iArea = LBI_GetNavAreaParent(iGoalArea);
-	if (iArea <= 0)return GetVectorDistance(g_fClientAbsOrigin[iClient], fGoalPos);
+	if (!iArea)return GetVectorDistance(g_fClientAbsOrigin[iClient], fGoalPos);
 
 	float fClosePoint[3]; LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
 	float fDistance = GetVectorDistance(fClosePoint, fGoalPos);
@@ -5638,7 +5353,7 @@ float GetClientTravelDistance(int iClient, float fGoalPos[3])
 float GetClientEntityTravelDistance(int iClient, int iEntity)
 {
 	int iStartArea = g_iClientNavArea[iClient];
-	if (iStartArea <= 0)return -1.0;
+	if (!iStartArea)return -1.0;
 
 	int iGoalArea = 0;
 	float fEntPos[3];
@@ -5652,7 +5367,7 @@ float GetClientEntityTravelDistance(int iClient, int iEntity)
 		GetEntityAbsOrigin(iEntity, fEntPos);
 		iGoalArea = L4D_GetNearestNavArea(fEntPos, _, true, true, true, GetClientTeam(iClient));
 	}
-	if (iGoalArea <= 0)return -1.0;
+	if (!iGoalArea)return -1.0;
 
 	if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), 0.0, GetClientTeam(iClient), false))
 	{
@@ -5660,7 +5375,7 @@ float GetClientEntityTravelDistance(int iClient, int iEntity)
 	}
 
 	int iArea = LBI_GetNavAreaParent(iGoalArea);
-	if (iArea <= 0)return GetVectorDistance(g_fClientAbsOrigin[iClient], fEntPos);
+	if (!iArea)return GetVectorDistance(g_fClientAbsOrigin[iClient], fEntPos);
 
 	float fClosePoint[3]; LBI_GetClosestPointOnNavArea(iArea, fEntPos, fClosePoint);
 	float fDistance = GetVectorDistance(fClosePoint, fEntPos);
@@ -5681,16 +5396,16 @@ float GetClientEntityTravelDistance(int iClient, int iEntity)
 float GetVectorTravelDistance(float fStartPos[3], float fGoalPos[3], float fMaxLength = 2048.0, int iTeam = 2)
 {
 	int iStartArea = L4D_GetNearestNavArea(fStartPos, _, true, true, true, iTeam);
-	if (iStartArea <= 0)return -1.0;
+	if (!iStartArea)return -1.0;
 	
 	int iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true, iTeam);
-	if (iGoalArea <= 0)return -1.0;
+	if (!iGoalArea)return -1.0;
 
 	if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), fMaxLength, iTeam, false))
 		return -1.0;
 
 	int iArea = LBI_GetNavAreaParent(iGoalArea);
-	if (iArea <= 0)return GetVectorDistance(fStartPos, fGoalPos);
+	if (!iArea)return GetVectorDistance(fStartPos, fGoalPos);
 
 	float fClosePoint[3]; LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
 	float fDistance = GetVectorDistance(fClosePoint, fGoalPos);
@@ -5726,11 +5441,6 @@ bool LBI_IsSurvivorInCombat(int iClient, bool bUnknown = false)
 	return (SDKCall(g_hIsInCombat, iClient, bUnknown));
 }
 
-bool LBI_IsUseableEntity(int iClient, int iEntity)
-{
-	return (SDKCall(g_hIsUseableEntity, iClient, iEntity, 0));
-}
-
 int LBI_FindUseEntity(int iClient, float fCheckDist = 96.0, float fFloat_1 = 0.0, float fFloat_2 = 0.0, bool bBool_1 = false, bool bBool_2 = false)
 {
 	return (SDKCall(g_hFindUseEntity, iClient, fCheckDist, fFloat_1, fFloat_2, bBool_1, bBool_2));
@@ -5738,27 +5448,27 @@ int LBI_FindUseEntity(int iClient, float fCheckDist = 96.0, float fFloat_1 = 0.0
 
 bool LBI_IsSurvivorBotAvailable(int iClient)
 {
-	return (SDKCall(g_hIsAvailable, iClient) != 0);
+	return (SDKCall(g_hIsAvailable, iClient));
 }
 
 bool LBI_IsReachableNavArea(int iClient, int iGoalArea, int iStartArea = -1)
 {
 	int iLastArea = g_iClientNavArea[iClient];
-	if (iLastArea <= 0)return false;
+	if (!iLastArea)return false;
 	
 	if (iStartArea == -1)iStartArea = iLastArea;
-	return (iStartArea > 0 && (iStartArea == iGoalArea || SDKCall(g_hIsReachableNavArea, iClient, iStartArea, iGoalArea)));
+	return (iStartArea && (iStartArea == iGoalArea || SDKCall(g_hIsReachableNavArea, iClient, iStartArea, iGoalArea)));
 }
 
 bool LBI_IsReachablePosition(int iClient, const float fPos[3])
 {
 	int iNearArea = L4D_GetNearestNavArea(fPos, 200.0, true, true, false, 0);
-	return (iNearArea > 0 && LBI_IsReachableNavArea(iClient, iNearArea));
+	return (iNearArea && LBI_IsReachableNavArea(iClient, iNearArea));
 }
 
 bool LBI_IsReachableEntity(int iClient, int iEntity)
 {
-	if (IsValidClient(iEntity) && g_iClientNavArea[iEntity] <= 0)return false;
+	if (IsValidClient(iEntity) && !g_iClientNavArea[iEntity])return false;
 	float fEntityPos[3]; GetEntityAbsOrigin(iEntity, fEntityPos);
 	return (LBI_IsReachablePosition(iClient, fEntityPos));
 }
@@ -5769,7 +5479,7 @@ MRESReturn DTR_OnInfernoTouchNavArea(int iInferno, Handle hReturn, Handle hParam
 	if (!bIsTouching)return MRES_Ignored;
 
 	int iNavArea = DHookGetParam(hParams, 1);
-	if (iNavArea <= 0)return MRES_Ignored;
+	if (!iNavArea)return MRES_Ignored;
 
 	float fAreaPos[3];
 	bool bCanBlock = true;
@@ -5812,551 +5522,16 @@ MRESReturn DTR_OnFindUseEntity(int iClient, Handle hReturn, Handle hParams)
 	return MRES_ChangedOverride;
 }
 
-int GetClientLookTarget(int iClient)
-{
-	float fEyeForward[3];
-	GetAngleVectors(g_fClientEyeAng[iClient], fEyeForward, NULL_VECTOR, NULL_VECTOR);
-	NormalizeVector(fEyeForward, fEyeForward);
-
-	int iClosestClient = 0;
-	float fCurDist = -1.0, fLastDist = -1.0, fLookPos[3];
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (i == iClient || !IsPlayerSurvivor(i) || RadToDeg(ArcCosine(GetLineOfSightDotProduct(iClient, g_fClientCenteroid[i]))) > 30.0 || !IsVisibleEntity(iClient, i, MASK_VISIBLE_AND_NPCS))
-			continue;
-
-		fCurDist = GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[i]);
-		fLookPos[0] = g_fClientEyePos[iClient][0] + fEyeForward[0] * fCurDist;
-		fLookPos[1] = g_fClientEyePos[iClient][1] + fEyeForward[1] * fCurDist;
-		fLookPos[2] = g_fClientEyePos[iClient][2] + fEyeForward[2] * fCurDist;
-
-		fCurDist = GetVectorDistance(g_fClientCenteroid[i], fLookPos, true);		
-		if (fLastDist == -1.0 || fCurDist < fLastDist)
-		{
-			iClosestClient = i;
-			fLastDist = fCurDist;
-		}
-	}
-	return iClosestClient;
-}
-
-// Nick
-static const char g_szSurvivorNameSceneFiles_Nick_General[][] = {
-	"scenes/Gambler/NameProducerC101.vcd","scenes/Gambler/NameProducerC110.vcd","scenes/Gambler/NameProducerC112.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Nick_Ellis[][] = {
-	"scenes/Gambler/NameEllis02.vcd","scenes/Gambler/NameEllis03.vcd","scenes/Gambler/NameEllis05.vcd","scenes/Gambler/NameEllis06.vcd",
-	"scenes/Gambler/NameEllis08.vcd","scenes/Gambler/NameEllis11.vcd","scenes/Gambler/NameEllis12.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Nick_Ellis_C1[][] = {
-	"scenes/Gambler/NameMechanicC104.vcd","scenes/Gambler/NameMechanicC106.vcd","scenes/Gambler/NameMechanicC107.vcd","scenes/Gambler/NameMechanicC108.vcd",
-	"scenes/Gambler/NameMechanicC109.vcd","scenes/Gambler/NameMechanicC110.vcd","scenes/Gambler/NameMechanicC111.vcd","scenes/Gambler/NameEllis15.vcd",
-	"scenes/Gambler/NameEllis17.vcd","scenes/Gambler/NameEllis21.vcd","scenes/Gambler/NameEllis22.vcd","scenes/Gambler/NameEllis24.vcd","scenes/Gambler/NameEllis25.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Nick_Rochelle[][] = {
-	"scenes/Gambler/NameRochelle03.vcd","scenes/Gambler/NameRochelle04.vcd","scenes/Gambler/NameRochelle07.vcd","scenes/Gambler/NameRochelle08.vcd",
-	"scenes/Gambler/NameRochelle09.vcd","scenes/Gambler/NameRochelle10.vcd","scenes/Gambler/NameRochelle11.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Nick_Rochelle_C1[][] = {
-	"scenes/Gambler/NameProducerC101.vcd","scenes/Gambler/NameProducerC102.vcd","scenes/Gambler/NameProducerC105.vcd","scenes/Gambler/NameProducerC107.vcd",
-	"scenes/Gambler/NameProducerC109.vcd","scenes/Gambler/NameProducerC110.vcd","scenes/Gambler/NameProducerC111.vcd","scenes/Gambler/NameProducerC112.vcd",
-	"scenes/Gambler/NameProducerC113.vcd","scenes/Gambler/NameProducerC114.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Nick_Coach[][] = {
-	"scenes/Gambler/NameCoach05.vcd","scenes/Gambler/NameCoach11.vcd","scenes/Gambler/NameCoach12.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Nick_Francis[][] = {
-	"scenes/Gambler/NameMechanicC101.vcd","scenes/Gambler/NameMechanicC102.vcd","scenes/Gambler/NameMechanicC103.vcd"
-};
-
-// Coach
-static const char g_szSurvivorNameSceneFiles_Coach_General[][] = {
-	"scenes/Coach/NameGamblerC107.vcd","scenes/Coach/NameGamblerC108.vcd","scenes/Coach/NameGamblerC102.vcd","scenes/Coach/NameGamblerC103.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Coach_Nick[][] = {
-	"scenes/Coach/NameNick02.vcd","scenes/Coach/NameNick03.vcd","scenes/Coach/NameNick06.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Coach_Nick_C1[][] = {
-	"scenes/Coach/NameGamblerC104.vcd","scenes/Coach/NameGamblerC105.vcd","scenes/Coach/NameGamblerC106.vcd","scenes/Coach/NameGamblerC107.vcd",
-	"scenes/Coach/NameGamblerC108.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Coach_Ellis[][] = {
-	"scenes/Coach/NameEllis08.vcd","scenes/Coach/NameEllis09.vcd","scenes/Coach/NameEllis10.vcd","scenes/Coach/NameEllis11.vcd","scenes/Coach/NameEllis12.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Coach_Ellis_C1[][] = {
-	"scenes/Coach/NameEllis10.vcd","scenes/Coach/NameEllis11.vcd","scenes/Coach/NameEllis12.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Coach_Rochelle[][] = {
-	"scenes/Coach/NameRochelle01.vcd","scenes/Coach/NameRochelle02.vcd","scenes/Coach/NameRochelle04.vcd","scenes/Coach/NameRochelle10.vcd","scenes/Coach/NameRochelle11.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Coach_Rochelle_C1[][] = {
-	"scenes/Coach/NameProducerC101.vcd","scenes/Coach/NameProducerC103.vcd","scenes/Coach/NameProducerC104.vcd","scenes/Coach/NameProducerC107.vcd",
-	"scenes/Coach/NameProducerC108.vcd","scenes/Coach/NameProducerC109.vcd","scenes/Coach/NameProducerC110.vcd","scenes/Coach/NameProducerC111.vcd"
-};
-
-// Rochelle
-static const char g_szSurvivorNameSceneFiles_Rochelle_General[][] = {
-	"scenes/Producer/NameMechanicC109.vcd","scenes/Producer/NameMechanicC110.vcd","scenes/Producer/NameMechanicC113.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Rochelle_Nick[][] = {
-	"scenes/Producer/NameNick04.vcd","scenes/Producer/NameNick05.vcd","scenes/Producer/NameNick06.vcd","scenes/Producer/NameNick08.vcd","scenes/Producer/NameNick10.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Rochelle_Nick_C1[][] = {
-	"scenes/Producer/NameGamblerC103.vcd","scenes/Producer/NameGamblerC104.vcd","scenes/Producer/NameGamblerC105.vcd","scenes/Producer/NameGamblerC106.vcd",
-	"scenes/Producer/NameGamblerC107.vcd","scenes/Producer/NameGamblerC108.vcd","scenes/Producer/NameGamblerC109.vcd","scenes/Producer/NameGamblerC110.vcd", 
-	"scenes/Producer/NameGamblerC111.vcd","scenes/Producer/NameNick07.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Rochelle_Ellis[][] = {
-	"scenes/Producer/NameEllis04.vcd","scenes/Producer/NameEllis07.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Rochelle_Ellis_C1[][] = {
-	"scenes/Producer/NameMechanicC101.vcd","scenes/Producer/NameMechanicC102.vcd","scenes/Producer/NameMechanicC105.vcd","scenes/Producer/NameMechanicC106.vcd",
-	"scenes/Producer/NameMechanicC108.vcd","scenes/Producer/NameMechanicC109.vcd","scenes/Producer/NameMechanicC110.vcd","scenes/Producer/NameMechanicC111.vcd",
-	"scenes/Producer/NameMechanicC112.vcd","scenes/Producer/NameMechanicC113.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Rochelle_Coach[][] = {
-	"scenes/Producer/NameCoach01.vcd","scenes/Producer/NameCoach06.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Rochelle_Coach_C1[][] = {
-	"scenes/Producer/NameCoach11.vcd","scenes/Producer/NameCoach12.vcd","scenes/Producer/NameCoach13.vcd","scenes/Producer/NameCoach15.vcd",
-	"scenes/Producer/NameCoach18.vcd","scenes/Producer/NameCoach19.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Rochelle_Zoey[][] = {
-	"scenes/Producer/NameMechanicC101.vcd","scenes/Producer/NameMechanicC108.vcd","scenes/Producer/NameMechanicC112.vcd"
-};
-
-// Ellis
-static const char g_szSurvivorNameSceneFiles_Ellis_General[][] = {
-	"scenes/Mechanic/NameGamblerC101.vcd","scenes/Mechanic/NameGamblerC102.vcd","scenes/Mechanic/NameGamblerC104.vcd","scenes/Mechanic/NameGamblerC110.vcd",
-	"scenes/Mechanic/NameGamblerC111.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Ellis_Nick[][] = {
-	"scenes/Mechanic/NameNick06.vcd","scenes/Mechanic/NameNick07.vcd","scenes/Mechanic/NameNick08.vcd","scenes/Mechanic/NameNick09.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Ellis_Nick_C1[][] = {
-	"scenes/Mechanic/NameGamblerC101.vcd","scenes/Mechanic/NameGamblerC103.vcd","scenes/Mechanic/NameGamblerC107.vcd","scenes/Mechanic/NameGamblerC108.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Ellis_Rochelle[][] = {
-	"scenes/Mechanic/NameRochelle08.vcd","scenes/Mechanic/NameRochelle09.vcd","scenes/Mechanic/NameRochelle10.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Ellis_Rochelle_C1[][] = {
-	"scenes/Mechanic/NameProducerC101.vcd","scenes/Mechanic/NameProducerC102.vcd","scenes/Mechanic/NameProducerC105.vcd","scenes/Mechanic/NameProducerC106.vcd",
-	"scenes/Mechanic/NameProducerC107.vcd","scenes/Mechanic/NameProducerC109.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Ellis_Coach[][] = {
-	"scenes/Mechanic/NameCoach02.vcd","scenes/Mechanic/NameCoach09.vcd","scenes/Mechanic/NameCoach12.vcd","scenes/Mechanic/NameCoach01.vcd",
-	"scenes/Mechanic/NameCoach02.vcd","scenes/Mechanic/NameCoach05.vcd","scenes/Mechanic/NameCoach09.vcd","scenes/Mechanic/NameCoach10.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Ellis_Coach_C1[][] = {
-	"scenes/Mechanic/NameCoachC102.vcd","scenes/Mechanic/NameCoachC105.vcd","scenes/Mechanic/NameCoachC106.vcd","scenes/Mechanic/NameCoachC107.vcd",
-	"scenes/Mechanic/NameCoachC108.vcd","scenes/Mechanic/NameCoachC103.vcd","scenes/Mechanic/NameCoachC104.vcd"
-};
-
-static const char g_szSurvivorNameSceneFiles_Ellis_Zoey[][] = {
-	"scenes/Mechanic/DLC1_C6M3_FinaleL4D1Killing06.vcd","scenes/Mechanic/DLC1_C6M3_FinaleL4D1Killing11.vcd"
-};
-
-// Bill
-static const char g_szSurvivorNameSceneFiles_Bill_Zoey[][] = {
-	"scenes/NamVet/NameZoey03.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Bill_Francis[][] = {
-	"scenes/NamVet/NameFrancis03.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Bill_Louis[][] = {
-	"scenes/NamVet/NameLouis03.vcd"
-};
-
-// Francis
-static const char g_szSurvivorNameSceneFiles_Francis_Zoey[][] = {
-	"scenes/Biker/NameZoey03.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Francis_Louis[][] = {
-	"scenes/Biker/NameLouis03.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Francis_Bill[][] = {
-	"scenes/Biker/NameBill03.vcd"
-};
-
-// Louis
-static const char g_szSurvivorNameSceneFiles_Louis_Zoey[][] = {
-	"scenes/Manager/NameZoey04.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Louis_Francis[][] = {
-	"scenes/Manager/NameFrancis04.vcd","scenes/Manager/NameFrancis05.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Louis_Bill[][] = {
-	"scenes/Manager/NameBill04.vcd","scenes/Manager/NameBill05.vcd"
-};
-
-// Zoey
-static const char g_szSurvivorNameSceneFiles_Zoey_Bill[][] = {
-	"scenes/TeenGirl/NameBill07.vcd","scenes/TeenGirl/NameBill12.vcd","scenes/TeenGirl/NameBill07.vcd","scenes/TeenGirl/NameBill09.vcd","scenes/TeenGirl/NameBill10.vcd",
-	"scenes/TeenGirl/NameBill11.vcd","scenes/TeenGirl/NameBill12.vcd","scenes/TeenGirl/NameBill13.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Zoey_Louis[][] = {
-	"scenes/TeenGirl/NameLouis02.vcd","scenes/TeenGirl/NameLouis08.vcd","scenes/TeenGirl/NameLouis12.vcd"
-};
-static const char g_szSurvivorNameSceneFiles_Zoey_Francis[][] = {
-	"scenes/TeenGirl/NameFrancis02.vcd","scenes/TeenGirl/NameFrancis06.vcd","scenes/TeenGirl/NameFrancis09.vcd","scenes/TeenGirl/NameFrancis10.vcd",
-	"scenes/TeenGirl/NameFrancis11.vcd","scenes/TeenGirl/NameFrancis12.vcd","scenes/TeenGirl/NameFrancis14.vcd","scenes/TeenGirl/NameFrancis15.vcd",
-	"scenes/TeenGirl/NameFrancis16.vcd","scenes/TeenGirl/NameFrancis20.vcd"
-};
-
-public Action OnVocalizeCommand(int iClient, const char[] szVocalize, int iInitiator)
-{
-	if (IsFakeClient(iClient))
-		return Plugin_Continue;
-
-	if (g_hCvar_BotsMove.BoolValue && strcmp(szVocalize, "PlayerWaitHere") == 0)
-	{
-		g_hCvar_BotsMove.BoolValue = false;
-		return Plugin_Continue;
-	}
-	
-	if (strcmp(szVocalize, "PlayerMoveOn") == 0 || strcmp(szVocalize, "PlayerHurryUp") == 0 || strcmp(szVocalize, "PlayerYellRun") == 0 || strcmp(szVocalize, "PlayerFollowMe") == 0 || strcmp(szVocalize, "PlayerStayTogether") == 0)
-	{
-		for (int i = 1; i <= MaxClients; i++)
-		{
-			if (!IsPlayerSurvivor(i) || !IsFakeClient(i))
-				continue;
-
-			g_bSurvivorBot_ForceWeaponFire[i] = false;
-			g_fSurvivorBot_ForceWeaponFire_Delay[i] = 0.0;
-			g_fSurvivorBot_ForceWeaponFire_Duration[i] = 0.0;
-			g_iSurvivorBot_ForceWeaponFire_Slot[i] = -1;
-
-			g_bSurvivorBot_ForceThrowGrenade[i] = false;
-
-			SetVectorToZero(g_fSurvivorBot_LookPosition[i]);
-			g_fSurvivorBot_LookPosition_Duration[i] = GetGameTime();
-
-			g_iSurvivorBot_ScavengeItem[i] = -1;
-			g_fSurvivorBot_ForceApproachDist[i] = -1.0;
-			g_fSurvivorBot_NextScavengeItemScanTime[i] = GetGameTime() + 5.0;
-
-			if (IsValidVector(g_fSurvivorBot_MovePos_Position[i]))
-			{
-				ClearMoveToPosition(i);
-			}
-		}
-
-		g_hCvar_BotsMove.BoolValue = true;
-		return Plugin_Continue;
-	}
-
-	int iLookTarget = GetClientLookTarget(iClient);
-	if (strcmp(szVocalize, "SmartLook") == 0)
-	{
-		if (!IsValidClient(iLookTarget) || !IsFakeClient(iLookTarget) || GetClientDistance(iClient, iLookTarget, true) > (400.0*400.0))
-			return Plugin_Continue;
-		
-		g_iPlayerVocalize_OrderTarget[iClient] = iLookTarget;
-		g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime() + 5.0;
-		
-		int iClientType = GetClientSurvivorType(iClient);
-		int iTargetType = GetClientSurvivorType(iLookTarget);
-		char szSceneFile[MAX_SCENEFILE_LENGTH];
-		bool bIsC1 = (strcmp(g_szCurrentMapName, "c1m1_hotel") == 0 || strcmp(g_szCurrentMapName, "c1m2_streets") == 0 && GetRandomInt(1, 3) == 1);
-
-		switch(iClientType)
-		{
-			case L4D_SURVIVOR_NICK:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_COACH: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Coach[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Coach) - 1)]);
-					case L4D_SURVIVOR_ELLIS: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Ellis_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Ellis_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Ellis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Ellis) - 1)]);
-					}
-					case L4D_SURVIVOR_ROCHELLE: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Rochelle_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Rochelle_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Rochelle[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Rochelle) - 1)]);
-					}
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Rochelle_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Rochelle_C1) - 1)]);
-					case L4D_SURVIVOR_FRANCIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_Francis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_Francis) - 1)]);
-					default: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Nick_General[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Nick_General) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_COACH:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_NICK: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Nick_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Nick_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Nick[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Nick) - 1)]);
-					}
-					case L4D_SURVIVOR_ELLIS: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Ellis_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Ellis_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Ellis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Ellis) - 1)]);
-					}
-					case L4D_SURVIVOR_ROCHELLE: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Rochelle_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Rochelle_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Rochelle[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Rochelle) - 1)]);
-					}
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_Rochelle_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_Rochelle_C1) - 1)]);
-					default: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Coach_General[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Coach_General) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_ELLIS:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_COACH: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Coach_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Coach_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Coach[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Coach) - 1)]);
-					}
-					case L4D_SURVIVOR_NICK: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Nick_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Nick_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Nick[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Nick) - 1)]);
-					}
-					case L4D_SURVIVOR_ROCHELLE: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Rochelle_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Rochelle_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Rochelle[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Rochelle) - 1)]);
-					}
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Zoey[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Zoey) - 1)]);
-					case L4D_SURVIVOR_FRANCIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_Coach_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_Coach_C1) - 1)]);
-					default: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Ellis_General[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Ellis_General) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_ROCHELLE:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_COACH: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Coach_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Coach_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Coach[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Coach) - 1)]);
-					}
-					case L4D_SURVIVOR_ELLIS: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Ellis_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Ellis_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Ellis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Ellis) - 1)]);
-					}
-					case L4D_SURVIVOR_NICK: 
-					{
-						if (bIsC1)strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Nick_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Nick_C1) - 1)]);
-						else strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Nick[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Nick) - 1)]);
-					}
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Zoey[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Zoey) - 1)]);
-					case L4D_SURVIVOR_FRANCIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_Coach_C1[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_Coach_C1) - 1)]);
-					default: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Rochelle_General[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Rochelle_General) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_BILL:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Bill_Zoey[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Bill_Zoey) - 1)]);
-					case L4D_SURVIVOR_FRANCIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Bill_Francis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Bill_Francis) - 1)]);
-					case L4D_SURVIVOR_LOUIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Bill_Louis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Bill_Louis) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_ZOEY:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_BILL: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Zoey_Bill[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Zoey_Bill) - 1)]);
-					case L4D_SURVIVOR_FRANCIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Zoey_Francis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Zoey_Francis) - 1)]);
-					case L4D_SURVIVOR_LOUIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Zoey_Louis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Zoey_Louis) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_FRANCIS:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_BILL: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Francis_Bill[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Francis_Bill) - 1)]);
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Francis_Zoey[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Francis_Zoey) - 1)]);
-					case L4D_SURVIVOR_LOUIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Francis_Louis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Francis_Louis) - 1)]);
-				}
-			}
-			case L4D_SURVIVOR_LOUIS:
-			{
-				switch(iTargetType)
-				{
-					case L4D_SURVIVOR_BILL: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Louis_Bill[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Louis_Bill) - 1)]);
-					case L4D_SURVIVOR_FRANCIS: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Louis_Francis[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Louis_Francis) - 1)]);
-					case L4D_SURVIVOR_ZOEY: strcopy(szSceneFile, sizeof(szSceneFile), g_szSurvivorNameSceneFiles_Louis_Zoey[GetRandomInt(0, sizeof(g_szSurvivorNameSceneFiles_Louis_Zoey) - 1)]);
-				}
-			}
-		}
-
-		if (szSceneFile[0] != 0)
-		{
-			PerformSceneEx(iClient, "", szSceneFile);
-			return Plugin_Stop;
-		}
-
-		return Plugin_Continue;
-	}
-	
-	int iOrderTarget = g_iPlayerVocalize_OrderTarget[iClient];
-	if (GetGameTime() > g_fPlayerVocalize_OrderTargetResetTime[iClient] || !IsValidClient(iOrderTarget) || !IsFakeClient(iOrderTarget) || !IsPlayerAlive(iOrderTarget) || GetClientTeam(iOrderTarget) != 2)
-	{
-		g_iPlayerVocalize_OrderTarget[iClient] = -1;
-		g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime();
-		return Plugin_Continue;
-	}
-	
-	if (strcmp(szVocalize, "AskForHealth2") == 0)
-	{
-		g_iSurvivorBot_HealTarget[iOrderTarget] = iClient;
-		return Plugin_Continue;
-	}
-
-	if (strcmp(szVocalize, "iMT_PlayerSuggestHealth") == 0 && IsValidClient(iLookTarget))
-	{
-		if (iLookTarget == iOrderTarget)
-		{
-			if (SurvivorHasHealthKit(iLookTarget) == 1)
-			{
-				g_bSurvivorBot_ForceWeaponFire[iLookTarget] = true;
-				g_iSurvivorBot_ForceWeaponFire_Slot[iLookTarget] = 3;
-				g_fSurvivorBot_ForceWeaponFire_Delay[iLookTarget] = GetGameTime() + 1.0;
-				g_fSurvivorBot_ForceWeaponFire_Duration[iLookTarget] = GetGameTime() + FindConVar("first_aid_kit_use_duration").FloatValue + 1.0;
-			}
-			else if (GetClientWeaponInventory(iLookTarget, 4) != -1)
-			{
-				g_bSurvivorBot_ForceWeaponFire[iLookTarget] = true;
-				g_iSurvivorBot_ForceWeaponFire_Slot[iLookTarget] = 4;
-				g_fSurvivorBot_ForceWeaponFire_Delay[iLookTarget] = GetGameTime() + 1.0;
-				g_fSurvivorBot_ForceWeaponFire_Duration[iLookTarget] = GetGameTime() + 1.5;
-			}
-			g_fPlayerVocalize_OrderTargetResetTime[iClient] = (g_fSurvivorBot_ForceWeaponFire_Duration[iLookTarget] + 5.0);
-			return Plugin_Continue;
-		}
-
-		g_iSurvivorBot_HealTarget[iOrderTarget] = iLookTarget;
-		return Plugin_Continue;
-	}
-
-	float fAimPos[3]; 
-	GetClientAimPosition(iClient, fAimPos);
-
-	if (strcmp(szVocalize, "PlayerAreaClear") == 0)
-	{
-		if (IsSurvivorCarryingProp(iOrderTarget))
-		{
-			g_bSurvivorBot_ForceSwitchWeapon[iOrderTarget] = true;
-			for (int i = 0; i <= 5; i++)
-			{
-				SwitchWeaponSlot(iOrderTarget, i);
-				if (L4D_GetPlayerCurrentWeapon(iOrderTarget) == GetClientWeaponInventory(iOrderTarget, i))
-				{
-					g_bSurvivorBot_ForceSwitchWeapon[iOrderTarget] = false;
-					break;
-				}
-			}
-			g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime() + 5.0;
-			return Plugin_Continue;
-		}
-
-		if (!IsWeaponSlotActive(iOrderTarget, 0) && (!IsWeaponSlotActive(iOrderTarget, 1) || SurvivorHasMeleeWeapon(iOrderTarget) && GetVectorDistance(g_fClientEyePos[iOrderTarget], fAimPos, true) > (g_fCvar_ImprovedMelee_AttackRange*g_fCvar_ImprovedMelee_AttackRange)))
-			return Plugin_Continue;
-		
-		int iCurWpn = L4D_GetPlayerCurrentWeapon(iOrderTarget);
-		float fAttackDuration = (GetWeaponCycleTime(iCurWpn) * (GetWeaponClipSize(iCurWpn) * 0.33));
-
-		BotLookAtPosition(iOrderTarget, fAimPos, fAttackDuration);
-		g_bSurvivorBot_ForceWeaponFire[iOrderTarget] = true;
-		g_fSurvivorBot_ForceWeaponFire_Delay[iOrderTarget] = GetGameTime();
-		g_fSurvivorBot_ForceWeaponFire_Duration[iOrderTarget] = GetGameTime() + fAttackDuration;
-		
-		g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime() + 5.0 + fAttackDuration;
-		return Plugin_Continue;
-	}
-
-	if (strcmp(szVocalize, "PlayerBackUp") == 0)
-	{
-		if (GetClientWeaponInventory(iOrderTarget, 2) == -1 || IsSurvivorCarryingProp(iOrderTarget))
-			return Plugin_Continue;
-
-		float fThrowPos[3], fThrowVel[3];
-		CalculateTrajectory(g_fClientEyePos[iOrderTarget], fAimPos, 700.0, 0.4, fThrowVel);
-		AddVectors(g_fClientEyePos[iOrderTarget], fThrowVel, fThrowPos);
-
-		BotLookAtPosition(iOrderTarget, fThrowPos, 5.0);
-		g_bSurvivorBot_ForceThrowGrenade[iOrderTarget] = true;
-
-		g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime() + 8.0;
-		return Plugin_Continue;
-	}
-
-	if (strcmp(szVocalize, "PlayerAlertGiveItem") == 0)
-	{
-		int iScavengeItem = LBI_FindUseEntity(iClient, GetVectorDistance(g_fClientEyePos[iClient], fAimPos) + 32.0);
-		if (!IsEntityExists(iScavengeItem))iScavengeItem = GetClientAimTarget(iClient, false);
-
-		if (!IsEntityExists(iScavengeItem) || IsValidClient(GetEntityOwner(iScavengeItem)) || ItemSpawnerHasEnoughItems(iScavengeItem) == 0 || !IsEntityWeapon(iScavengeItem) && !LBI_IsUseableEntity(iOrderTarget, iScavengeItem))
-			return Plugin_Continue;
-
-		float fTravelDist = GetClientEntityTravelDistance(iOrderTarget, iScavengeItem);
-		if (fTravelDist > 2048.0)return Plugin_Continue;
-
-		float fReachTime = (fTravelDist / GetClientMaxSpeed(iOrderTarget));
-		if (fReachTime < 1.0)fReachTime = 1.0;
-
-		g_iSurvivorBot_ScavengeItem[iOrderTarget] = iScavengeItem;
-		g_fSurvivorBot_ForceApproachDist[iOrderTarget] = 2048.0;
-		g_fSurvivorBot_NextScavengeItemScanTime[iOrderTarget] = GetGameTime() + fReachTime + 3.0;
-		PerformSceneEx(iOrderTarget, "PlayerYes", _, GetRandomFloat(0.75, 1.25));
-
-		g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime() + 5.0 + fReachTime;
-		return Plugin_Continue;
-	}
-
-	if (strcmp(szVocalize, "PlayerEmphaticGo") == 0)
-	{
-		int iNavArea = L4D_GetNearestNavArea(fAimPos);
-		if (iNavArea <= 0)return Plugin_Continue;
-
-		float fMovePos[3]; LBI_GetClosestPointOnNavArea(iNavArea, fAimPos, fMovePos);
-		float fTravelDist = GetClientTravelDistance(iOrderTarget, fMovePos);
-		if (fTravelDist == -1.0 || fTravelDist > 2048.0 || LBI_IsDamagingPosition(fMovePos))return Plugin_Continue;
-
-		SetMoveToPosition(iOrderTarget, fMovePos, 3, "CommandMove");
-		PerformSceneEx(iOrderTarget, "PlayerYes", _, GetRandomFloat(0.5, 1.5));
-
-		g_fPlayerVocalize_OrderTargetResetTime[iClient] = GetGameTime() + 5.0 + (fTravelDist / GetClientMaxSpeed(iClient));
-		return Plugin_Continue;
-	}
-
-	return Plugin_Continue;
-}
-
 int LBI_IsPathToPositionDangerous(int iClient, float fGoalPos[3])
 {
 	bool bTankInPlay = L4D2_IsTankInPlay();
 	if (bTankInPlay)
 	{
 		ArrayList hTankList = new ArrayList();
-		float fGoalOffset[3]; fGoalOffset = fGoalPos; fGoalOffset[2] += 36.0;
+		float fGoalOffset[3]; fGoalOffset = fGoalPos; fGoalOffset[2] += HUMAN_HALF_HEIGHT;
 
 		int iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true);
-		if (iGoalArea <= 0)
+		if (!iGoalArea)
 		{
 			delete hTankList;
 			return -1;
@@ -6383,7 +5558,7 @@ int LBI_IsPathToPositionDangerous(int iClient, float fGoalPos[3])
 		}
 
 		int iClientArea = g_iClientNavArea[iClient];
-		if (iClientArea <= 0)
+		if (!iClientArea)
 		{
 			delete hTankList;
 			return -1;
@@ -6396,7 +5571,7 @@ int LBI_IsPathToPositionDangerous(int iClient, float fGoalPos[3])
 		}
 
 		int iParent = LBI_GetNavAreaParent(iGoalArea);
-		if (iParent > 0)
+		if (iParent)
 		{
 			int iTank; float fAreaPos[3];
 			for (; LBI_GetNavAreaParent(iParent); iParent = LBI_GetNavAreaParent(iParent))
@@ -6481,7 +5656,7 @@ Action OnMoveToIncapacitatedFriendAction(BehaviorAction hAction, int iActor, flo
 
 BehaviorAction CreateSurvivorLegsRetreatAction(int iThreat)
 {
-	BehaviorAction hAction = ActionsManager.Allocate(0x483C);
+	BehaviorAction hAction = ActionsManager.Allocate(0x744A);
 	SDKCall(g_hSurvivorLegsRetreat, hAction, iThreat);
 	return hAction;
 }
