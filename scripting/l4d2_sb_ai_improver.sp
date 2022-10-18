@@ -501,11 +501,11 @@ void CreateAndHookConVars()
 	g_hCvar_ImprovedMelee_SwitchRange 				= CreateConVar("l4d2_improvedbots_melee_switch_range", "300", "Range at which bot's target should be to switch to melee weapon.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ImprovedMelee_ApproachRange				= CreateConVar("l4d2_improvedbots_melee_approach_range", "500", "Range at which bot's target should be to approach it. <0: Disable Approaching>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ImprovedMelee_AimRange 					= CreateConVar("l4d2_improvedbots_melee_aim_range", "125", "Range at which bot's target should be to start taking aim at it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_AttackRange 				= CreateConVar("l4d2_improvedbots_melee_attack_range", "75", "Range at which bot's target should be to start attacking it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_AttackRange 				= CreateConVar("l4d2_improvedbots_melee_attack_range", "70", "Range at which bot's target should be to start attacking it.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ImprovedMelee_ShoveChance 				= CreateConVar("l4d2_improvedbots_melee_shove_chance", "4", "Chance for bot to bash target instead of attacking with melee. <0: Disable Bashing>", FCVAR_NOTIFY, true, 0.0);
 
 	g_hCvar_ImprovedMelee_ChainsawLimit 			= CreateConVar("l4d2_improvedbots_melee_chainsaw_limit", "1", "The total number of chainsaws allowed on the team. <0: Bots never use chainsaw>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_SwitchCount2 				= CreateConVar("l4d2_improvedbots_melee_chainsaw_switch_count", "8", "The nearby infected count required for bot to switch to chainsaw.", FCVAR_NOTIFY, true, 1.0);
+	g_hCvar_ImprovedMelee_SwitchCount2 				= CreateConVar("l4d2_improvedbots_melee_chainsaw_switch_count", "6", "The nearby infected count required for bot to switch to chainsaw.", FCVAR_NOTIFY, true, 1.0);
 
 	g_hCvar_TargetSelection_Enabled					= CreateConVar("l4d2_improvedbots_targetselection_enabled", "1", "Enables survivor bots' improved target selection.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_TargetSelection_ShootRange				= CreateConVar("l4d2_improvedbots_targetselection_shootrange", "2000", "Range at which target need to be for bots to start firing at it.", FCVAR_NOTIFY, true, 0.0);
@@ -517,7 +517,7 @@ void CreateAndHookConVars()
 	g_hCvar_GrenadeThrow_Enabled 					= CreateConVar("l4d2_improvedbots_grenadethrowing_enabled", "1", "Enables survivor bots throwing grenades.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_GrenadeThrow_GrenadeTypes				= CreateConVar("l4d2_improvedbots_grenadethrowing_grenadetypes", "7", "What grenades should survivor bots throw? <1: Pipe-Bomb, 2: Molotov, 4: Bile Bomb. Add numbers together.>", FCVAR_NOTIFY, true, 1.0, true, 7.0);
 	g_hCvar_GrenadeThrow_ThrowRange					= CreateConVar("l4d2_improvedbots_grenadethrowing_throw_range", "1000", "Range at which target needs to be for bot to throw grenade at it.", FCVAR_NOTIFY);
-	g_hCvar_GrenadeThrow_HordeSize 					= CreateConVar("l4d2_improvedbots_grenadethrowing_horde_size_multiplier", "4.0", "Infected count required to throw grenade Multiplier (Value * SurvivorCount).", FCVAR_NOTIFY, true, 1.0);
+	g_hCvar_GrenadeThrow_HordeSize 					= CreateConVar("l4d2_improvedbots_grenadethrowing_horde_size_multiplier", "3.75", "Infected count required to throw grenade Multiplier (Value * SurvivorCount).", FCVAR_NOTIFY, true, 1.0);
 	g_hCvar_GrenadeThrow_NextThrowTime1 			= CreateConVar("l4d2_improvedbots_grenadethrowing_next_throw_time_min", "20", "First number to pick to randomize next grenade throw time.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_GrenadeThrow_NextThrowTime2 			= CreateConVar("l4d2_improvedbots_grenadethrowing_next_throw_time_max", "30", "Second number to pick to randomize next grenade throw time.", FCVAR_NOTIFY, true, 0.0);
 
@@ -530,8 +530,8 @@ void CreateAndHookConVars()
 	g_hCvar_HelpPinnedFriend_ShootRange				= CreateConVar("l4d2_improvedbots_help_pinnedfriend_shootrange", "2000", "Range at which bots will start firing at SI.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_HelpPinnedFriend_ShoveRange				= CreateConVar("l4d2_improvedbots_help_pinnedfriend_shoverange", "75", "Range at which bots will start to bash SI.", FCVAR_NOTIFY), true, 0.0;
 
-	g_hCvar_DefibRevive_Enabled						= CreateConVar("l4d2_improvedbots_defib_revive_enabled", "1", "Enables survivor bots reviving dead players with defibrillators if they have one.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_DefibRevive_ScanDist 					= CreateConVar("l4d2_improvedbots_defib_revive_distance", "2000", "Range at which survivor's corpse should be for bot to able to revive it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_DefibRevive_Enabled						= CreateConVar("l4d2_improvedbots_defib_revive_enabled", "1", "Enable bots reviving dead players with defibrillators if they have one available.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_DefibRevive_ScanDist 					= CreateConVar("l4d2_improvedbots_defib_revive_distance", "2000", "Range at which survivor's dead body should be for bot to consider it reviveable.", FCVAR_NOTIFY, true, 0.0);
 
 	g_hCvar_FireBash_Chance1						= CreateConVar("l4d2_improvedbots_fireshove_chance_pumpshotguns", "4", "Chance at which survivor bot may shove after firing a pump-action shotgun. <0: Disabled, 1: Always>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_FireBash_Chance2						= CreateConVar("l4d2_improvedbots_fireshove_chance_css_sniperrifles", "3", "Chance at which survivor bot may shove after firing a bolt-action sniper rifle. <0: Disabled, 1: Always>", FCVAR_NOTIFY, true, 0.0);
@@ -561,7 +561,7 @@ void CreateAndHookConVars()
 	g_hCvar_VisionFieldOfView 						= CreateConVar("l4d2_improvedbots_fieldofview", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
 	
 	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "0", "If survivor bot shouldn't drop his currently carrying prop no matter what.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "1", "If survivor bot shouldn't drop his currently carrying prop no matter what.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_KeepMovingInCombat						= CreateConVar("l4d2_improvedbots_keepmovingincombat", "1", "If bots shouldn't stop moving in combat when there's no human players in team.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_SwitchOffCSSWeapons						= CreateConVar("l4d2_improvedbots_switchoffcssweapon", "1", "If bots should change their primary weapon to other one if they're using CSS weapons.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_ChargerEvasion							= CreateConVar("l4d2_improvedbots_chargerevasion", "1", "Enables survivor bots's charger dodging behavior.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -569,9 +569,9 @@ void CreateAndHookConVars()
 	g_hCvar_DontSwitchToPistol						= CreateConVar("l4d2_improvedbots_dontswitchtopistol", "1", "If bots shouldn't switch to their pistol while they have sniper rifle equiped.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("l4d2_improvedbots_witchbehavior_walkwhennearby", "500", "Survivor bots will start walking near witch if they're this range near her and she's not disturbed. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun. <0: Disabled; 1: Only if survivor team doesn't have any human players left; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun type weapon. <0: Disabled; 1: Only if survivor team doesn't have any human players; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
 
-	g_hCvar_NextProcessTime 						= CreateConVar("l4d2_improvedbots_process_time", "0.1", "Delay required for bots to process heavy computings on CPU ('for', 'while' loops, etc.).", FCVAR_NOTIFY, true, 0.033);
+	g_hCvar_NextProcessTime 						= CreateConVar("l4d2_improvedbots_process_time", "0.1", "Bots' data computing time delay (infected count, nearby friends, etc). Increasing the value might help increasing the game performance, but slow down bots.", FCVAR_NOTIFY, true, 0.033);
 
 	g_hCvar_GameDifficulty.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxMeleeSurvivors.AddChangeHook(OnConVarChanged);
