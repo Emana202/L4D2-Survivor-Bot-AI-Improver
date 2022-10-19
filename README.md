@@ -5,13 +5,17 @@ A SourceMod plugin for L4D2 trying to improve survivor bots' AI as much as possi
 
 ## Notable features
 - Better melee weapon handling and usage
-- Ability to use Tier 3 weapons and chainsaws without modifying weapon scripts
-- Ability to set a primary weapon preference for each survivor type for bots
-- New improved and configurable item scavenging
-- Improved spitter acid evasion behavior
+- Usage of Tier 3 weapons and Chainsaws without modifying weapon scripts
+- Configurable weapon preference for each survivor type
+- Improved and configurable item scavenging system
+- Faster spitter acid evasion
+- Charger charge dodging
+- Deployment of upgradepacks 
 - Defibing death survivors
 - Better infected target selection
-- And other features...
+- Fixed AI behavior when battling with tank and witch
+- Grenade throwing
+- And many other features...
 
 ---
 
@@ -420,7 +424,7 @@ l4d2_improvedbots_witchbehavior_walkwhennearby "500"
 - **MetaMod:Source 1.11 or higher:** https://www.sourcemm.net/downloads.php?branch=stable
 - **SourceMod 1.11 or higher:** https://www.sourcemod.net/downloads.php?branch=stable
 - **Left 4 DHooks Direct:** https://forums.alliedmods.net/showthread.php?t=321696
-- **Actions (Optional - Fixes bots always rushing to save their incapped friend in tank battle):** https://forums.alliedmods.net/showpost.php?p=2771520&postcount=1
+- **Actions (Optional - Fixes bots always rushing to save their incapped friend or stopping to retreat in tank battle ):** https://forums.alliedmods.net/showpost.php?p=2771520&postcount=1
 
 ---
 
