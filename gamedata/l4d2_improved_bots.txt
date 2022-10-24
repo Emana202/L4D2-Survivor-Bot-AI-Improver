@@ -73,6 +73,14 @@
 				"windows"	"\x2A\x2A\x2A\x2A\x2A\x2A\xA1\x2A\x2A\x2A\x2A\x33\x2A\x89\x2A\x2A\x53\x8B\x2A\x2A\x56\x8B\x2A\x83\x2A\x2A\x2A\x2A\x2A\x2A\x57"
 			}
 
+			"CPhysicsProp::GetMass"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK12CPhysicsProp7GetMassEv"
+				"mac"		"@_ZNK12CPhysicsProp7GetMassEv"
+				"windows"	"\x55\x8B\xEC\x51\x8B\x89\x24\x02\x00\x00"
+			}
+
 			"CTerrorPlayer::FindUseEntity"
 			{
 				"library"	"server"
@@ -103,6 +111,14 @@
 				"linux"		"@_ZNK11SurvivorBot11IsAvailableEv"
 				"mac"		"@_ZNK11SurvivorBot11IsAvailableEv"
 				"windows"	"\x53\x8B\xD9\xE8\x2A\x2A\x2A\x2A\xD9\xE8"
+			}
+			
+			"SurvivorBot::GetAvoidRange"
+			{
+				"library"	"server"
+				"linux"		"@_ZNK11SurvivorBot13GetAvoidRangeEP11CBaseEntity"
+				"mac"		"@_ZNK11SurvivorBot13GetAvoidRangeEP11CBaseEntity"
+				"windows"	"\x55\x8B\xEC\x56\x8B\x75\x08\x57\x8B\xF9\x85\xF6\x0F\x84\x2A\x2A\x2A\x2A\x56"
 			}
 			
 			"CInferno::IsTouching<CNavArea>"
