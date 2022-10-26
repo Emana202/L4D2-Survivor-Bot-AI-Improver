@@ -1024,10 +1024,10 @@ void ResetClientPluginVariables(int iClient)
 	if (!IsValidClient(iClient) || !IsFakeClient(iClient) || GetClientTeam(iClient) != 2)
 		return;
 
-	LBI_CommandABot(iClient, 3, NULL_VECTOR);
+	L4D2_CommandABot(iClient, 0, BOT_CMD_RESET);
 }
 
-void LBI_CommandABot(int iBot, int iCmd, const float fPos[3], int iTarget = -1)
+/*void LBI_CommandABot(int iBot, int iCmd, const float fPos[3], int iTarget = -1)
 {
 	if (!IsValidClient(iBot) || !IsFakeClient(iBot) || !IsPlayerAlive(iBot))
 		return;
@@ -1048,7 +1048,7 @@ void LBI_CommandABot(int iBot, int iCmd, const float fPos[3], int iTarget = -1)
 
 	StrCat(sBuffer, sizeof(sBuffer), "})");
 	L4D2_ExecVScriptCode(sBuffer);
-}
+}*/
 
 void Event_OnWeaponFire(Event hEvent, const char[] sName, bool bBroadcast)
 {
@@ -1554,7 +1554,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		}
 		else if (GetGameTime() > g_fSurvivorBot_NextMoveCommandTime[iClient])
 		{	
-			LBI_CommandABot(iClient, 1, fMovePos);
+			L4D2_CommandABot(iClient, 0, BOT_CMD_MOVE, fMovePos);
 			g_fSurvivorBot_CurMovePos[iClient] = fMovePos;
 			g_fSurvivorBot_NextMoveCommandTime[iClient] = GetGameTime() + BOT_CMD_MOVE_INTERVAL;
 		}
@@ -1673,7 +1673,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				}
 				if (fTankDist <= (384.0*384.0) || fTankDist <= (768.0*768.0) && bTankVisible)
 				{
-					LBI_CommandABot(iClient, 2, NULL_VECTOR, iTankTarget);
+					L4D2_CommandABot(iClient, iTankTarget, BOT_CMD_RETREAT);
 				}
 			}
 		}
@@ -1740,7 +1740,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 
 			if (iWitchHarasser == iClient && fWitchDist <= (1024.0*1024.0) && !L4D_IsPlayerIncapacitated(iClient))
 			{
-				LBI_CommandABot(iClient, 2, NULL_VECTOR, iWitchTarget);
+				L4D2_CommandABot(iClient, iWitchTarget, BOT_CMD_RETREAT);
 			}
 		}
 		else 
@@ -2459,7 +2459,7 @@ void ClearMoveToPosition(int iClient, const char[] sCheckName = "")
 	g_sSurvivorBot_MovePos_Name[iClient][0] = 0;
 
 	SetVectorToZero(g_fSurvivorBot_CurMovePos[iClient]);
-	LBI_CommandABot(iClient, 3, NULL_VECTOR);
+	L4D2_CommandABot(iClient, 0, BOT_CMD_RESET);
 }
 
 void SetMoveToPosition(int iClient, float fMovePos[3], int iPriority, const char[] sName = "", float fAddDuration = 0.66, float fDistTolerance = -1.0, bool bIgnoreDamaging = false, bool bIgnoreCheckpoints = false)
