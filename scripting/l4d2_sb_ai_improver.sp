@@ -92,6 +92,13 @@ float g_fCvar_TargetSelection_ShootRange2;
 float g_fCvar_TargetSelection_ShootRange3;
 float g_fCvar_TargetSelection_ShootRange4;
 bool g_bCvar_TargetSelection_IgnoreDociles;
+/*----------------------------------------------------------------------------------------------------*/
+static ConVar g_hCvar_Vision_FieldOfView;
+static float g_fCvar_Vision_FieldOfView;
+
+static ConVar g_hCvar_Vision_NoticeTimeScale;
+static float g_fCvar_Vision_NoticeTimeScale;
+
 /*============ TANK RELATED CONVARS ==================================================================*/
 static ConVar g_hCvar_TankRock_ShootEnabled;
 static ConVar g_hCvar_TankRock_ShootRange;
@@ -193,7 +200,6 @@ static ConVar g_hCvar_NextProcessTime;
 static float g_fCvar_NextProcessTime;
 
 /*============ MISC CONVARS =========================================================*/
-static ConVar g_hCvar_VisionFieldOfView;
 static ConVar g_hCvar_AlwaysCarryProp;
 static ConVar g_hCvar_SpitterAcidEvasion;
 static ConVar g_hCvar_SwitchOffCSSWeapons;
@@ -202,7 +208,6 @@ static ConVar g_hCvar_ChargerEvasion;
 static ConVar g_hCvar_DeployUpgradePacks;
 static ConVar g_hCvar_DontSwitchToPistol;
 
-static float g_fCvar_VisionFieldOfView;
 static bool g_bCvar_SpitterAcidEvasion;
 static bool g_bCvar_AlwaysCarryProp;
 static bool g_bCvar_SwitchOffCSSWeapons;
@@ -556,7 +561,8 @@ void CreateAndHookConVars()
 	g_hCvar_MaxWeaponTier3_M60 						= CreateConVar("l4d2_improvedbots_tier3weaponlimit_m60", "1", "The total number of M60s allowed on the team. <0: Bots never use M60>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_MaxWeaponTier3_GLauncher 				= CreateConVar("l4d2_improvedbots_tier3weaponlimit_grenadelauncher", "1", "The total number of grenade launchers allowed on the team. <0: Bots never use grenade launcher>", FCVAR_NOTIFY, true, 0.0);
 	
-	g_hCvar_VisionFieldOfView 						= CreateConVar("l4d2_improvedbots_fieldofview", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
+	g_hCvar_Vision_FieldOfView 						= CreateConVar("l4d2_improvedbots_vision_fieldofview", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
+	g_hCvar_Vision_NoticeTimeScale 					= CreateConVar("l4d2_improvedbots_vision_noticetimescale", "1.0", "The time required for bots to notice enemy target is multiplied to this value.", FCVAR_NOTIFY, true, 0.0, true, 4.0);
 	
 	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "1", "If survivor bot shouldn't drop his currently carrying prop no matter what.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
@@ -642,7 +648,8 @@ void CreateAndHookConVars()
 	g_hCvar_MaxWeaponTier3_M60.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxWeaponTier3_GLauncher.AddChangeHook(OnConVarChanged);
 	
-	g_hCvar_VisionFieldOfView.AddChangeHook(OnConVarChanged);
+	g_hCvar_Vision_FieldOfView.AddChangeHook(OnConVarChanged);
+	g_hCvar_Vision_NoticeTimeScale.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_SpitterAcidEvasion.AddChangeHook(OnConVarChanged);
 	g_hCvar_AlwaysCarryProp.AddChangeHook(OnConVarChanged);
@@ -746,12 +753,14 @@ void UpdateConVarValues()
 	g_iCvar_MaxWeaponTier3_M60 							= g_hCvar_MaxWeaponTier3_M60.IntValue;
 	g_iCvar_MaxWeaponTier3_GLauncher 					= g_hCvar_MaxWeaponTier3_GLauncher.IntValue;
 	
-	g_fCvar_VisionFieldOfView 							= g_hCvar_VisionFieldOfView.FloatValue;
+	g_fCvar_Vision_FieldOfView 							= g_hCvar_Vision_FieldOfView.FloatValue;
+	g_fCvar_Vision_NoticeTimeScale 						= g_hCvar_Vision_NoticeTimeScale.FloatValue;
+	
 	g_bCvar_SpitterAcidEvasion							= g_hCvar_SpitterAcidEvasion.BoolValue;
 	g_bCvar_AlwaysCarryProp								= g_hCvar_AlwaysCarryProp.BoolValue;
 	g_bCvar_SwitchOffCSSWeapons							= g_hCvar_SwitchOffCSSWeapons.BoolValue;
 	g_bCvar_ChargerEvasion								= g_hCvar_ChargerEvasion.BoolValue;
-	g_bCvar_DeployUpgradePacks								= g_hCvar_DeployUpgradePacks.BoolValue;
+	g_bCvar_DeployUpgradePacks							= g_hCvar_DeployUpgradePacks.BoolValue;
 	g_bCvar_DontSwitchToPistol							= g_hCvar_DontSwitchToPistol.BoolValue;
 
 	if (g_bMapStarted)
@@ -1205,9 +1214,9 @@ void Event_OnWitchHaraserSet(Event hEvent, const char[] sName, bool bBroadcast)
 public Action OnPlayerRunCmd(int iClient, int &iButtons, int &iImpulse, float fVel[3], float fAngles[3])
 {
 	GetClientEyePosition(iClient, g_fClientEyePos[iClient]);
+	g_fClientEyeAng[iClient] = fAngles;
 	GetClientAbsOrigin(iClient, g_fClientAbsOrigin[iClient]);
 	GetEntityCenteroid(iClient, g_fClientCenteroid[iClient]);
-	g_fClientEyeAng[iClient] = fAngles;
 	g_iClientNavArea[iClient] = L4D_GetLastKnownArea(iClient);
 
 	if (!IsClientSurvivor(iClient))
@@ -1392,7 +1401,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 					iTankTarget = i;
 					fLastDist3 = fCurDist;
 				}
-				if (!bSmokerOrBoomerNearby)bSmokerOrBoomerNearby = ((iClientClass == L4D2ZombieClass_Smoker || iClientClass == L4D2ZombieClass_Boomer) && (fCurDist <= (512.0*512.0) || HadVisualContactWithEntity(i, iClient, false, NULL_VECTOR)));
+				if (!bSmokerOrBoomerNearby)bSmokerOrBoomerNearby = ((iClientClass == L4D2ZombieClass_Smoker || iClientClass == L4D2ZombieClass_Boomer) && (fCurDist <= (512.0*512.0) || HadVisualContactWithEntity(i, iClient, false)));
 			}
 		}
 
@@ -1720,7 +1729,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				else if (iHasShotgun)fShootRange = g_fCvar_TargetSelection_ShootRange2;
 				else if (SurvivorHasSniperRifle(iClient))fShootRange = g_fCvar_TargetSelection_ShootRange3;
 
-				bool bWitchVisible = HasVisualContactWithEntity(iClient, iWitchTarget, false, NULL_VECTOR);
+				bool bWitchVisible = HasVisualContactWithEntity(iClient, iWitchTarget, false);
 				if (fWitchDist <= (fShootRange*fShootRange) && bWitchVisible)
 				{
 					SnapViewToPosition(iClient, fFirePos);				
@@ -1895,7 +1904,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 			iFireTarget = iTankTarget;
 		}
 
-		if (IsEntityExists(iFireTarget) && HasVisualContactWithEntity(iClient, iFireTarget, (iFireTarget != iTankTarget), NULL_VECTOR))
+		if (IsEntityExists(iFireTarget) && HasVisualContactWithEntity(iClient, iFireTarget, (iFireTarget != iTankTarget)))
 		{
 			L4D2ZombieClassType iInfectedClass = L4D2ZombieClass_NotInfected;
 			if (IsValidClient(iFireTarget))iInfectedClass = L4D2_GetPlayerZombieClass(iFireTarget);
@@ -2287,7 +2296,7 @@ Action OnSurvivorSwitchWeapon(int iClient, int iWeapon)
 					return Plugin_Handled;
 				}
 			}
-			else if (IsWeaponReloading(iCurWeapon) || GetWeaponClip1(iCurWeapon) != GetWeaponClipSize(iCurWeapon))
+			else if (IsWeaponReloading(iCurWeapon) || GetWeaponClip1(iCurWeapon) != GetWeaponClipSize(iCurWeapon) && !LBI_IsSurvivorInCombat(iClient))
 			{
 				g_bSurvivorBot_ForceWeaponReload[iClient] = true;
 				return Plugin_Handled;
@@ -4430,7 +4439,7 @@ int GetFarthestInfected(int iClient, float fDistance = -1.0)
 	return iInfected;
 }
 
-void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, float fOverridePos[3])
+void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, float fOverridePos[3] = NULL_VECTOR)
 {
 	float fVisionTime = (bFOVOnly ? g_fSurvivorBot_VisionMemory_Time_FOV[iClient][iEntity] : g_fSurvivorBot_VisionMemory_Time[iClient][iEntity]);
 	if (GetGameTime() < fVisionTime)return;
@@ -4450,7 +4459,7 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 	int iVisionState = (bFOVOnly ? g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] : g_iSurvivorBot_VisionMemory_State[iClient][iEntity]);
 	if (!bFOVOnly)
 	{
-		fNoticeTime = ClampFloat(0.66 * (fDot / 165.0) + (fEntityDist / fMaxDist), 0.1, 1.5);
+		fNoticeTime = (ClampFloat(0.66 * (fDot / 165.0) + (fEntityDist / fMaxDist), 0.1, 1.5) * g_fCvar_Vision_NoticeTimeScale);
 		switch(iVisionState)
 		{
 			case 0:
@@ -4485,7 +4494,7 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 	}
 	else
 	{
-		fNoticeTime = ClampFloat(0.33 * (fDot / g_fCvar_VisionFieldOfView) + (fEntityDist / fMaxDist), 0.1, 0.75);
+		fNoticeTime = (ClampFloat(0.33 * (fDot / g_fCvar_Vision_FieldOfView) + (fEntityDist / fMaxDist), 0.1, 0.75) * g_fCvar_Vision_NoticeTimeScale);
 		switch(iVisionState)
 		{
 			case 0:
@@ -4520,14 +4529,14 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 	}
 }
 
-bool HasVisualContactWithEntity(int iClient, int iEntity, bool bFOVState = true, float fOverridePos[3])
+bool HasVisualContactWithEntity(int iClient, int iEntity, bool bFOVState = true, float fOverridePos[3] = NULL_VECTOR)
 {
 	CheckEntityForVisibility(iClient, iEntity, bFOVState, fOverridePos);
 	int iState = (bFOVState ? g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] : g_iSurvivorBot_VisionMemory_State[iClient][iEntity]);
 	return (iState == 2);
 }
 
-bool HadVisualContactWithEntity(int iClient, int iEntity, bool bFOVState = true, float fOverridePos[3])
+bool HadVisualContactWithEntity(int iClient, int iEntity, bool bFOVState = true, float fOverridePos[3] = NULL_VECTOR)
 {
 	CheckEntityForVisibility(iClient, iEntity, bFOVState, fOverridePos);
 	int iState = (bFOVState ? g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] : g_iSurvivorBot_VisionMemory_State[iClient][iEntity]);
@@ -4701,7 +4710,7 @@ float GetLineOfSightDotProduct(int iClient, const float fVecSpot[3])
 
 bool FVectorInViewCone(int iClient, const float fVecSpot[3], float fCone = -1.0)
 {
-	if (fCone == -1.0)fCone = g_fCvar_VisionFieldOfView;
+	if (fCone == -1.0)fCone = g_fCvar_Vision_FieldOfView;
 	return (RadToDeg(ArcCosine(GetLineOfSightDotProduct(iClient, fVecSpot))) <= fCone);
 }
 
@@ -4722,13 +4731,13 @@ float GetViewAnglesDotProduct(int iClient, const float fVecSpot[3])
 
 bool FVectorInViewAngle(int iClient, const float fVecSpot[3], float fAngle = -1.0)
 {
-	if (fAngle == -1.0)fAngle = g_fCvar_VisionFieldOfView;
+	if (fAngle == -1.0)fAngle = g_fCvar_Vision_FieldOfView;
 	return (RadToDeg(ArcCosine(GetViewAnglesDotProduct(iClient, fVecSpot))) <= fAngle);
 }
 
 bool FEntityInViewAngle(int iClient, int iEntity, float fAngle = -1.0)
 {
-	if (fAngle == -1.0)fAngle = g_fCvar_VisionFieldOfView;
+	if (fAngle == -1.0)fAngle = g_fCvar_Vision_FieldOfView;
 	float fEntityAbsOrigin[3]; GetEntityCenteroid(iEntity, fEntityAbsOrigin);
 	return (RadToDeg(ArcCosine(GetViewAnglesDotProduct(iClient, fEntityAbsOrigin))) <= fAngle);
 }
@@ -5426,7 +5435,7 @@ bool LBI_IsReachablePosition(int iClient, const float fPos[3])
 
 bool LBI_IsReachableEntity(int iClient, int iEntity)
 {
-	if (IsValidClient(iEntity) && !g_iClientNavArea[iEntity])return false;
+	if (!IsEntityExists(iEntity) || IsValidClient(iEntity) && !g_iClientNavArea[iEntity])return false;
 	float fEntityPos[3]; GetEntityAbsOrigin(iEntity, fEntityPos);
 	return (LBI_IsReachablePosition(iClient, fEntityPos));
 }
@@ -5487,11 +5496,8 @@ MRESReturn DTR_OnInfernoTouchNavArea(int iInferno, Handle hReturn, Handle hParam
 
 MRESReturn DTR_OnFindUseEntity(int iClient, Handle hReturn, Handle hParams)
 {
-	if (!IsFakeClient(iClient))
-		return MRES_Ignored;
-
 	int iScavengeItem = g_iSurvivorBot_ScavengeItem[iClient];
-	if (!IsEntityExists(iScavengeItem) || DHookGetReturn(hReturn) == iScavengeItem)
+	if (iScavengeItem == -1 || !IsFakeClient(iClient) || DHookGetReturn(hReturn) == iScavengeItem)
 		return MRES_Ignored;
 
 	DHookSetReturn(hReturn, iScavengeItem);

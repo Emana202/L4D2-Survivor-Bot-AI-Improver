@@ -115,7 +115,14 @@ l4d2_improvedbots_evadespitteracids "1"
 // Default: "60.0"
 // Minimum: "0.000000"
 // Maximum: "180.000000"
-l4d2_improvedbots_fieldofview "60.0"
+l4d2_improvedbots_vision_fieldofview "60.0"
+
+// The time required for bots to notice enemy target is multiplied to this value.
+// -
+// Default: "1.0"
+// Minimum: "0.000000"
+// Maximum: "4.000000"
+l4d2_improvedbots_vision_noticetimescale "1.0"
 
 // Chance at which survivor bot may shove after firing a bolt-action sniper rifle. <0: Disabled, 1: Always>
 // -
