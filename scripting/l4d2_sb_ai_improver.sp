@@ -1081,10 +1081,8 @@ void Event_OnPlayerUse(Event hEvent, const char[] sName, bool bBroadcast)
 	if (!IsValidClient(iClient) || !IsFakeClient(iClient))return;
 
 	int iTarget = hEvent.GetInt("targetid");
-	if (!IsEntityExists(iTarget))return;
-
-	int iScavengeItem = g_iSurvivorBot_ScavengeItem[iClient];
-	if (iTarget != iScavengeItem)return;
+	if (iTarget != g_iSurvivorBot_ScavengeItem[iClient] || !IsEntityExists(iTarget))
+		return;
 
 	char sEntName[64]; GetEntityClassname(iTarget, sEntName, sizeof(sEntName));
 	if (strcmp(sEntName, "func_button_timed") == 0)return;
@@ -3789,7 +3787,7 @@ Action ScanMapForEntities(Handle timer)
 
 	for (int i = 0; i < MAXENTITIES; i++)
 	{
-		if (!IsValidEntity(i))continue;
+		if (!IsEntityExists(i))continue;
 		CheckEntityForItem(i);
 	}
 
@@ -5496,9 +5494,11 @@ MRESReturn DTR_OnInfernoTouchNavArea(int iInferno, Handle hReturn, Handle hParam
 
 MRESReturn DTR_OnFindUseEntity(int iClient, Handle hReturn, Handle hParams)
 {
-	int iScavengeItem = g_iSurvivorBot_ScavengeItem[iClient];
-	if (iScavengeItem == -1 || !IsFakeClient(iClient) || DHookGetReturn(hReturn) == iScavengeItem)
+	if (!IsValidClient(iClient) || !IsFakeClient(iClient))
 		return MRES_Ignored;
+
+	int iScavengeItem = g_iSurvivorBot_ScavengeItem[iClient];
+	if (!IsEntityExists(iScavengeItem))return MRES_Ignored;
 
 	DHookSetReturn(hReturn, iScavengeItem);
 	return MRES_ChangedOverride;
