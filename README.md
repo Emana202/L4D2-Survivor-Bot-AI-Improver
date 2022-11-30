@@ -103,6 +103,20 @@ l4d2_improvedbots_deployupgradepacks "1"
 // Maximum: "1.000000"
 l4d2_improvedbots_dontswitchtopistol "1"
 
+If bots should take cover from tank's thrown rocks.
+// -
+// Default: "1"
+// Minimum: "0.000000"
+// Maximum: "1.000000"
+l4d2_improvedbots_takecoverfromtankrocks "1"
+
+// If bots should avoid and retreat from tanks that are nearby punchable props like cars.
+// -
+// Default: "1"
+// Minimum: "0.000000"
+// Maximum: "1.000000"
+l4d2_improvedbots_avoidtanksnearpunchableprops "1"
+
 // Enables survivor bots' improved spitter acid evasion
 // -
 // Default: "1"

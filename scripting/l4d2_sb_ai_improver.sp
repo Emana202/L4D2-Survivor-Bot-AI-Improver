@@ -207,6 +207,8 @@ static ConVar g_hCvar_KeepMovingInCombat;
 static ConVar g_hCvar_ChargerEvasion;
 static ConVar g_hCvar_DeployUpgradePacks;
 static ConVar g_hCvar_DontSwitchToPistol;
+static ConVar g_hCvar_TakeCoverFromRocks;
+static ConVar g_hCvar_AvoidTanksWithProp;
 
 static bool g_bCvar_SpitterAcidEvasion;
 static bool g_bCvar_AlwaysCarryProp;
@@ -214,6 +216,8 @@ static bool g_bCvar_SwitchOffCSSWeapons;
 static bool g_bCvar_ChargerEvasion;
 static bool g_bCvar_DeployUpgradePacks;
 static bool g_bCvar_DontSwitchToPistol;
+static bool g_bCvar_TakeCoverFromRocks;
+static bool g_bCvar_AvoidTanksWithProp;
 
 /*============ VARIABLES =========================================================*/
 static float g_fSurvivorBot_NextPressAttackTime[MAXPLAYERS+1];
@@ -453,7 +457,6 @@ public void OnPluginStart()
 
 	HookEvent("weapon_fire", 			Event_OnWeaponFire);
 	HookEvent("player_death", 			Event_OnPlayerDeath);
-	HookEvent("player_use", 			Event_OnPlayerUse);
 	
 	HookEvent("lunge_pounce", 			Event_OnSurvivorGrabbed);
 	HookEvent("tongue_grab", 			Event_OnSurvivorGrabbed);
@@ -571,6 +574,8 @@ void CreateAndHookConVars()
 	g_hCvar_ChargerEvasion							= CreateConVar("l4d2_improvedbots_chargerevasion", "1", "Enables survivor bots's charger dodging behavior.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_DeployUpgradePacks						= CreateConVar("l4d2_improvedbots_deployupgradepacks", "1", "If bots should deploy their upgrade pack when available and not in combat.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	g_hCvar_DontSwitchToPistol						= CreateConVar("l4d2_improvedbots_dontswitchtopistol", "1", "If bots shouldn't switch to their pistol while they have sniper rifle equiped.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_TakeCoverFromRocks						= CreateConVar("l4d2_improvedbots_takecoverfromtankrocks", "1", "If bots should take cover from tank's thrown rocks.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_AvoidTanksWithProp						= CreateConVar("l4d2_improvedbots_avoidtanksnearpunchableprops", "1", "If bots should avoid and retreat from tanks that are nearby punchable props like cars.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("l4d2_improvedbots_witchbehavior_walkwhennearby", "500", "Survivor bots will start walking near witch if they're this range near her and she's not disturbed. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun type weapon. <0: Disabled; 1: Only if survivor team doesn't have any human players; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
@@ -658,6 +663,8 @@ void CreateAndHookConVars()
 	g_hCvar_ChargerEvasion.AddChangeHook(OnConVarChanged);
 	g_hCvar_DeployUpgradePacks.AddChangeHook(OnConVarChanged);
 	g_hCvar_DontSwitchToPistol.AddChangeHook(OnConVarChanged);
+	g_hCvar_TakeCoverFromRocks.AddChangeHook(OnConVarChanged);
+	g_hCvar_AvoidTanksWithProp.AddChangeHook(OnConVarChanged);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby.AddChangeHook(OnConVarChanged);
 	g_hCvar_WitchBehavior_AllowCrowning.AddChangeHook(OnConVarChanged);
@@ -762,6 +769,8 @@ void UpdateConVarValues()
 	g_bCvar_ChargerEvasion								= g_hCvar_ChargerEvasion.BoolValue;
 	g_bCvar_DeployUpgradePacks							= g_hCvar_DeployUpgradePacks.BoolValue;
 	g_bCvar_DontSwitchToPistol							= g_hCvar_DontSwitchToPistol.BoolValue;
+	g_bCvar_TakeCoverFromRocks							= g_hCvar_TakeCoverFromRocks.BoolValue;
+	g_bCvar_AvoidTanksWithProp							= g_hCvar_AvoidTanksWithProp.BoolValue;
 
 	if (g_bMapStarted)
 	{
@@ -1073,22 +1082,6 @@ void Event_OnWeaponFire(Event hEvent, const char[] sName, bool bBroadcast)
 		g_bSurvivorBot_ForceBash[iClient] = true;
 		return;
 	}
-}
-
-void Event_OnPlayerUse(Event hEvent, const char[] sName, bool bBroadcast)
-{
-	int iClient = GetClientOfUserId(hEvent.GetInt("userid"));
-	if (!IsValidClient(iClient) || !IsFakeClient(iClient))return;
-
-	int iTarget = hEvent.GetInt("targetid");
-	if (iTarget != g_iSurvivorBot_ScavengeItem[iClient] || !IsEntityExists(iTarget))
-		return;
-
-	char sEntName[64]; GetEntityClassname(iTarget, sEntName, sizeof(sEntName));
-	if (strcmp(sEntName, "func_button_timed") == 0)return;
-
-	ClearMoveToPosition(iClient, "ScavengeItem");
-	g_iSurvivorBot_ScavengeItem[iClient] = -1;
 }
 
 void Event_OnPlayerDeath(Event hEvent, const char[] sName, bool bBroadcast)
@@ -1664,7 +1657,8 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		else 
 		{
 			int iVictim = g_iInfectedBot_CurrentVictim[iTankTarget];
-			if ((IsEntityExists(iTankProp) || IsVisibleEntity(iClient, iTankTarget, MASK_SHOT_HULL) && g_bInfectedBot_IsThrowing[iTankTarget]) && (iVictim == iClient || GetClientDistance(iClient, iVictim, true) <= (256.0*256.0)))
+			float fHeightDist = (fTankDist + (g_fClientAbsOrigin[iClient][2] - g_fClientAbsOrigin[iTankTarget][2]));
+			if (fHeightDist <= (1280.0*1280.0) && (g_bCvar_AvoidTanksWithProp && IsEntityExists(iTankProp) || g_bCvar_TakeCoverFromRocks && g_bInfectedBot_IsThrowing[iTankTarget]) && (iVictim == iClient || GetClientDistance(iClient, iVictim, true) <= (256.0*256.0)) && IsVisibleEntity(iClient, iTankTarget, MASK_SHOT_HULL))
 			{
 				if (strcmp(g_sSurvivorBot_MovePos_Name[iClient], "TakeCover") != 0)
 				{
@@ -2195,12 +2189,11 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 					if (GetGameTime() > g_fSurvivorBot_NextUsePressTime[iClient])
 					{
 						BotLookAtPosition(iClient, fItemPos, 0.33);
-						int iUseEnt = LBI_FindUseEntity(iClient, fUseRange);
-						if (iUseEnt == iScavengeItem) 
+						if ( LBI_FindUseEntity( iClient, fUseRange ) == iScavengeItem )
 						{
 							if (!bHoldKey)
 							{
-								g_fSurvivorBot_NextUsePressTime[iClient] = GetGameTime() + GetRandomFloat(0.25, 0.33);
+								g_fSurvivorBot_NextUsePressTime[iClient] = GetGameTime() + GetRandomFloat(0.1, 0.33);
 								if (GetRandomInt(1, 2) == 1)iButtons |= iUseButton;
 							}
 							else
@@ -2210,9 +2203,13 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 								{
 									bIncreasedTime = true;
 									
-									static ConVar hCvar_GasUseTime; if (!hCvar_GasUseTime)hCvar_GasUseTime = FindConVar("gas_can_use_duration");
-									float fAddTime = (hCvar_GasUseTime.FloatValue);
-									if (strcmp(sScavengeItem, "func_button_timed") == 0)fAddTime = float(GetEntProp(iScavengeItem, Prop_Data, "m_nUseTime"));									
+									float fAddTime = GetEntPropFloat(iScavengeItem, Prop_Data, "m_nUseTime");
+									if (strcmp(sScavengeItem, "func_button_timed") != 0)
+									{
+										static ConVar hCvar_GasUseTime; 
+										if (!hCvar_GasUseTime)hCvar_GasUseTime = FindConVar("gas_can_use_duration");
+										fAddTime = hCvar_GasUseTime.FloatValue;
+									}
 									if (L4D2_IsUnderAdrenalineEffect(iClient))fAddTime *= 0.5;
 
 									g_fSurvivorBot_NextScavengeItemScanTime[iClient] = GetGameTime() + fAddTime + 0.33;
@@ -2531,30 +2528,35 @@ bool SurvivorBot_IsTargetShootable(int iClient, int iTarget, int iCurWeapon, flo
 		bInViewCone = (FVectorInViewCone(iClient, g_fClientCenteroid[iTarget], fCone) && IsVisibleEntity(iClient, iTarget));
 	}
 
-	if (bInViewCone)
+	if (IsValidClient(iTarget))
 	{
-		L4D2ZombieClassType iClass = L4D2_GetPlayerZombieClass(iTarget);
-		if (iClass == L4D2ZombieClass_Boomer && GetClientDistance(iClient, iTarget, true) <= (BOT_BOOMER_AVOID_RADIUS*BOT_BOOMER_AVOID_RADIUS))
-			return false;
-		if (iClass == L4D2ZombieClass_Tank && iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) < 3 && IsWeaponReloading(iCurWeapon, false) && SurvivorHasShotgun(iClient))
-			return false;
-	}
-
-	if (GetClientTeam(iTarget) == 2 && !L4D_IsPlayerPinned(iTarget) && !L4D_IsPlayerIncapacitated(iClient))
-	{
-		if (bInViewCone && !g_bCvar_BotsShootThrough && (iCurWeapon == iPrimarySlot || iCurWeapon == GetClientWeaponInventory(iClient, 1) && (!SurvivorHasMeleeWeapon(iClient) || GetClientDistance(iClient, iTarget) <= 96.0)))
-			return false;
-
-		if (g_bCvar_BotsFriendlyFire) 
+		if (bInViewCone)
 		{
-			if (GetClientDistance(iClient, iTarget, true) <= (16.0*16.0))
+			L4D2ZombieClassType iClass = L4D2_GetPlayerZombieClass(iTarget);
+			if (iClass == L4D2ZombieClass_Boomer && GetClientDistance(iClient, iTarget, true) <= (BOT_BOOMER_AVOID_RADIUS*BOT_BOOMER_AVOID_RADIUS))
 				return false;
-			if (iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) != 0 && GetVectorDistance(fAimPos, g_fClientCenteroid[iTarget], true) <= (300.0*300.0) && SurvivorHasTier3Weapon(iClient) == 1 && GetVectorVisible(fAimPos, g_fClientCenteroid[iTarget]))
+			if (iClass == L4D2ZombieClass_Tank && iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) < 3 && IsWeaponReloading(iCurWeapon, false) && SurvivorHasShotgun(iClient))
 				return false;
 		}
+
+		if (GetClientTeam(iTarget) == 2 && !L4D_IsPlayerPinned(iTarget) && !L4D_IsPlayerIncapacitated(iClient))
+		{
+			if (bInViewCone && !g_bCvar_BotsShootThrough && (iCurWeapon == iPrimarySlot || iCurWeapon == GetClientWeaponInventory(iClient, 1) && (!SurvivorHasMeleeWeapon(iClient) || GetClientDistance(iClient, iTarget) <= 96.0)))
+				return false;
+
+			if (g_bCvar_BotsFriendlyFire) 
+			{
+				if (GetClientDistance(iClient, iTarget, true) <= (16.0*16.0))
+					return false;
+				if (iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) != 0 && GetVectorDistance(fAimPos, g_fClientCenteroid[iTarget], true) <= (300.0*300.0) && SurvivorHasTier3Weapon(iClient) == 1 && GetVectorVisible(fAimPos, g_fClientCenteroid[iTarget]))
+					return false;
+			}
+		}
+		
+		return true;
 	}
 
-	return true;
+	return bInViewCone;
 }
 
 bool SurvivorBot_CanFreelyFireWeapon(int iClient)
@@ -3801,11 +3803,10 @@ void CheckEntityForItem(int iEntity)
 
 	if (strcmp(sClassname, "witch") == 0)
 	{
-		int iWitchRef;
 		ArrayList hWitchData;
-
 		if (g_hWitchList.Length > 0)
 		{
+			int iWitchRef;
 			for (int i = 0; i < g_hWitchList.Length; i++)
 			{
 				hWitchData = g_hWitchList.Get(i);
