@@ -240,7 +240,6 @@ static float g_fSurvivorBot_NextScavengeItemScanTime[MAXPLAYERS+1];
 static float g_fSurvivorBot_VomitBlindedTime[MAXPLAYERS+1];
 
 static float g_fSurvivorBot_NextMoveCommandTime[MAXPLAYERS+1];
-static float g_fSurvivorBot_CurMovePos[MAXPLAYERS+1][3];
 
 static float g_fSurvivorBot_BlockWeaponSwitchTime[MAXPLAYERS+1];
 static float g_fSurvivorBot_BlockWeaponReloadTime[MAXPLAYERS+1];
@@ -1029,7 +1028,6 @@ void ResetClientPluginVariables(int iClient)
 
 	SetVectorToZero(g_fSurvivorBot_Grenade_ThrowPos[iClient]);
 	SetVectorToZero(g_fSurvivorBot_Grenade_AimPos[iClient]);
-	SetVectorToZero(g_fSurvivorBot_CurMovePos[iClient]);
 	SetVectorToZero(g_fSurvivorBot_LookPosition[iClient]);
 	SetVectorToZero(g_fSurvivorBot_MovePos_Position[iClient]);
 
@@ -1555,7 +1553,6 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		else if (GetGameTime() > g_fSurvivorBot_NextMoveCommandTime[iClient])
 		{	
 			L4D2_CommandABot(iClient, 0, BOT_CMD_MOVE, fMovePos);
-			g_fSurvivorBot_CurMovePos[iClient] = fMovePos;
 			g_fSurvivorBot_NextMoveCommandTime[iClient] = GetGameTime() + BOT_CMD_MOVE_INTERVAL;
 		}
 	}
@@ -1821,8 +1818,8 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 					}
 
 					bool bStopApproaching = true;
-					if (g_fCvar_ImprovedMelee_ApproachRange > 0.0 && GetGameTime() > g_fSurvivorBot_MeleeApproachTime[iClient] && !IsSurvivorBotBlindedByVomit(iClient) && !IsValidClient(iPinnedFriend) && (!IsValidClient(iTankTarget) || GetClientDistance(iClient, iTankTarget, true) > (1024.0*1024.0)) && LBI_IsReachableEntity(iClient, iInfectedTarget) &&
-						!L4D_IsAnySurvivorInCheckpoint() && !IsFinaleEscapeVehicleArrived() && (iInfectedClass == L4D2ZombieClass_NotInfected || (L4D_IsPlayerStaggering(iInfectedTarget) || L4D_GetPinnedSurvivor(iInfectedTarget) != 0))
+					if (g_fCvar_ImprovedMelee_ApproachRange > 0.0 && GetGameTime() > g_fSurvivorBot_MeleeApproachTime[iClient] && !IsSurvivorBotBlindedByVomit(iClient) && !IsValidClient(iPinnedFriend) && (!IsValidClient(iTankTarget) || GetClientDistance(iClient, iTankTarget, true) > (1024.0*1024.0)) && LBI_IsReachableEntity(iClient, iInfectedTarget) 
+						&& !IsFinaleEscapeVehicleArrived() && (iInfectedClass == L4D2ZombieClass_NotInfected || (L4D_IsPlayerStaggering(iInfectedTarget) || L4D_GetPinnedSurvivor(iInfectedTarget) != 0))
 					)
 					{
 						float fLeaderDist = ((iInfectedClass == L4D2ZombieClass_NotInfected && iTeamLeader != iClient && IsValidClient(iTeamLeader)) ? GetClientTravelDistance(iTeamLeader, fMovePos, true) : -2.0);
@@ -2455,14 +2452,13 @@ void ClearMoveToPosition(int iClient, const char[] sCheckName = "")
 	if (!IsValidVector(g_fSurvivorBot_MovePos_Position[iClient]) || LBI_IsDamagingNavArea(g_iClientNavArea[iClient]))
 		return;
 
-	SetVectorToZero(g_fSurvivorBot_MovePos_Position[iClient]);
 	g_iSurvivorBot_MovePos_Priority[iClient] = -1;
 	g_fSurvivorBot_MovePos_Duration[iClient] = GetGameTime();
 	g_fSurvivorBot_MovePos_Tolerance[iClient] = -1.0;
 	g_bSurvivorBot_MovePos_IgnoreDamaging[iClient] = false;
 	g_sSurvivorBot_MovePos_Name[iClient][0] = 0;
 
-	SetVectorToZero(g_fSurvivorBot_CurMovePos[iClient]);
+	SetVectorToZero(g_fSurvivorBot_MovePos_Position[iClient]);
 	L4D2_CommandABot(iClient, 0, BOT_CMD_RESET);
 }
 
