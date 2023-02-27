@@ -3683,8 +3683,13 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 		if (strcmp(sWeaponName, "prop_dynamic") == 0)continue;
 		
 		// Skip unpacked ammo upgrade if already used by iClient
-		if (strcmp(sWeaponName, "upgrade_ammo_explosive") == 0 || strcmp(sWeaponName, "upgrade_ammo_incendiary") == 0) && ( g_iItem_Used[iEntity] & (1 << (iClient - 1)) )
-			continue;
+		if (strcmp(sWeaponName, "upgrade_ammo_explosive") == 0 || strcmp(sWeaponName, "upgrade_ammo_incendiary") == 0)
+		{
+			if ( g_iItem_Used[iEntIndex] & (1 << (iClient - 1)) != 0 )
+			{
+				continue;
+			}
+		}
 
 		GetWeaponClassname(iEntIndex, sWeaponName, sizeof(sWeaponName));
 		if (sEntityName[0] != 0)
