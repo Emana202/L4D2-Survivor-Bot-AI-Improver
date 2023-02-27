@@ -319,6 +319,7 @@ static int g_iClientInventory[MAXPLAYERS+1][6];
 static int g_iWeapon_Clip1[MAXENTITIES+1];
 static int g_iWeapon_MaxAmmo[MAXENTITIES+1]; 
 static int g_iWeapon_AmmoLeft[MAXENTITIES+1];
+static int g_iItem_Used[MAXENTITIES+1]; // To fix bots grabbing same ammo upgrade repeatedly
 
 // ----------------------------------------------------------------------------------------------------
 // MELEE WEAPON MODELS
@@ -456,6 +457,7 @@ public void OnPluginStart()
 
 	HookEvent("weapon_fire", 			Event_OnWeaponFire);
 	HookEvent("player_death", 			Event_OnPlayerDeath);
+	HookEvent("player_use",				Event_OnPlayerUse);
 	
 	HookEvent("lunge_pounce", 			Event_OnSurvivorGrabbed);
 	HookEvent("tongue_grab", 			Event_OnSurvivorGrabbed);
@@ -1101,6 +1103,17 @@ void Event_OnPlayerDeath(Event hEvent, const char[] sName, bool bBroadcast)
 
 	g_bInfectedBot_IsThrowing[iVictim] = false;
 	g_fInfectedBot_CoveredInVomitTime[iVictim] = GetGameTime();
+}
+
+// Mark entity as used by certain client
+void Event_OnPlayerUse(Event hEvent, const char[] sName, bool bBroadcast)
+{
+	int iClient = GetClientOfUserId(hEvent.GetInt("userid"));
+	int iEntity = hEvent.GetInt("targetid");
+
+	int iUsedMask = (g_iItem_Used[iEntity] | 0);
+	iUsedMask |= ( 1 << (iClient - 1) );
+	g_iItem_Used[iEntity] = iUsedMask;
 }
 
 void Event_OnSurvivorGrabbed(Event hEvent, const char[] sName, bool bBroadcast)
@@ -3668,6 +3681,10 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 
 		GetEntityClassname(iEntIndex, sWeaponName, sizeof(sWeaponName));
 		if (strcmp(sWeaponName, "prop_dynamic") == 0)continue;
+		
+		// Skip unpacked ammo upgrade if already used by iClient
+		if (strcmp(sWeaponName, "upgrade_ammo_explosive") == 0 || strcmp(sWeaponName, "upgrade_ammo_incendiary") == 0) && ( g_iItem_Used[iEntity] & (1 << (iClient - 1)) )
+			continue;
 
 		GetWeaponClassname(iEntIndex, sWeaponName, sizeof(sWeaponName));
 		if (sEntityName[0] != 0)
@@ -3758,6 +3775,8 @@ public void OnEntityCreated(int iEntity, const char[] sClassname)
 {
 	if (iEntity <= 0 || iEntity > MAXENTITIES)
 		return;
+		
+	g_iItem_Used[iEntity] = 0; // Clear used item bitfield
 
 	if (strcmp(sClassname, "upgrade_ammo_explosive") == 0 || strcmp(sClassname, "upgrade_ammo_incendiary") == 0)
 	{
@@ -3928,6 +3947,8 @@ public void OnEntityDestroyed(int iEntity)
 {
 	if (iEntity <= 0 || iEntity > MAXENTITIES) 
 		return;
+		
+	g_iItem_Used[iEntity] = 0; // Clear used item bitfield
 
 	CheckArrayListForEntityRemoval(g_hMeleeList, iEntity);
 	CheckArrayListForEntityRemoval(g_hPistolList, iEntity);
