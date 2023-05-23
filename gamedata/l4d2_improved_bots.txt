@@ -62,7 +62,7 @@
 				"library"	"server"
 				"linux"		"@_ZN14CBaseAnimating10LookupBoneEPKc"
 				"mac"		"@_ZN14CBaseAnimating10LookupBoneEPKc"
-				"windows"	"\x2A\x2A\x2A\x2A\x8B\x2A\x83\x2A\x2A\x2A\x2A\x2A\x2A\x75\x2A\xE8\xEC"
+				"windows"	"\x2A\x2A\x2A\x2A\x8B\x2A\x83\x2A\x2A\x2A\x2A\x2A\x2A\x75\x2A\xE8\x8C\xFA"
 			}
 
 			"CBaseAnimating::GetBonePosition"

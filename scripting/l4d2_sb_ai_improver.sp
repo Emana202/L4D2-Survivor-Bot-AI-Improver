@@ -1560,7 +1560,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 	if (GetGameTime() > g_fSurvivorBot_PinnedReactTime[iClient] && IsValidClient(iPinnedFriend))
 	{
 		int iAttacker = L4D_GetPinnedInfected(iPinnedFriend);
-		if (iAttacker != 0)
+		if ( IsValidClient( iAttacker ) )
 		{
 			float fAttackerAimPos[3]; GetTargetAimPart(iClient, iAttacker, fAttackerAimPos);			
 			bool bAttackerVisible = HasVisualContactWithEntity(iClient, iAttacker, false, fAttackerAimPos);
@@ -3099,7 +3099,11 @@ int GetClientPrimaryAmmo(int iClient)
 {	
 	int iPrimaryWeapon = GetClientWeaponInventory(iClient, 0);
 	if (iPrimaryWeapon == -1)return -1;
-	return (GetEntProp(iClient, Prop_Send, "m_iAmmo", _, GetWeaponAmmoType(iPrimaryWeapon)));
+
+	int iAmmoType = GetWeaponAmmoType(iPrimaryWeapon);
+	if (iAmmoType == -1)return -1;
+
+	return (GetEntProp(iClient, Prop_Send, "m_iAmmo", _, iAmmoType));
 }
 
 public Action L4D_OnVomitedUpon(int victim, int &attacker, bool &boomerExplosion)
@@ -4383,7 +4387,7 @@ int GetClientSurvivorType(int iClient)
 
 bool IsEntityExists(int iEntity)
 {
-	return (iEntity > 0 && (iEntity <= MAXENTITIES && IsValidEdict(iEntity) || IsValidEntity(iEntity)));
+	return (iEntity > 0 && (iEntity <= MAXENTITIES && IsValidEdict(iEntity) || iEntity > MAXENTITIES && IsValidEntity(iEntity)));
 }
 
 bool IsCommonInfected(int iEntity)
@@ -4394,7 +4398,10 @@ bool IsCommonInfected(int iEntity)
 
 bool IsCommonInfectedAttacking(int iEntity)
 {
-	return (GetEntProp(iEntity, Prop_Send, "m_mobRush") != 0 || GetEntProp(iEntity, Prop_Send, "m_clientLookatTarget") != -1);
+	if (HasEntProp(iEntity, Prop_Send, "m_mobRush") && GetEntProp(iEntity, Prop_Send, "m_mobRush") != 0)
+		return true;
+
+	return (HasEntProp(iEntity, Prop_Send, "m_clientLookatTarget") && GetEntProp(iEntity, Prop_Send, "m_clientLookatTarget") != -1);
 }
 
 bool IsCommonInfectedAlive(int iEntity)
