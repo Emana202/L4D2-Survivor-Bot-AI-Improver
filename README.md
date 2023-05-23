@@ -1,24 +1,23 @@
-# PROJECT IS CURRENTLY UNMAINTAINED;
+# PROJECT IS CURRENTLY (mostly) UNMAINTAINED;
 
 ---
 
 # L4D2 Survivor Bot AI Improver
-A SourceMod plugin for L4D2 trying to improve survivor bots' AI as much as possible
+A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survivor Bots as much as possible without giving them a huge cheat-like advantages
 
 ---
 
 ## Notable features
-- Better melee weapon handling and usage
-- Usage of Tier 3 weapons and Chainsaws without modifying weapon scripts
-- Configurable weapon preference for each survivor type
+- Bots now properly approach their melee target and switch between normal swings and bashing + ability for them to use chainsaws.
+- Bots can now pickup and use Tier 3 weapons without having to modify weapon scripts via plugin and etc.
+- You can set the weapon preferences for each survivor type (Coach, Zoey, etc.) using the "l4d2_improvedbots_weapon_preference_*" convars in the plugin's config.
 - Improved and configurable item scavenging system
-- Faster spitter acid evasion
-- Charger charge dodging
-- Deployment of upgradepacks 
-- Defibing death survivors
-- Better infected target selection
-- Fixed AI behavior when battling with tank and witch
-- Grenade throwing
+- Bots now avoid moving through areas that are covered in spit or fire and try to find another way to get to their destination. They also react faster to getting spit under them and escape much efficiently.
+- Bots try to dodge the chargin' chargers and tank's rock that are thrown at them.
+- Bots now will deploy ammopacks if they have any primary weapon and defib dead survivors if they can
+- Bots shouldn't now completely ignore targets that are directly behind them and shoot at witch's feet at close range.
+- If the optional plugin is enabled, bots shouldn't now try to save a survivor if tanks are near them
+- Bots can now throw grenades at huge mob and tanks.
 - And many other features...
 
 ---
