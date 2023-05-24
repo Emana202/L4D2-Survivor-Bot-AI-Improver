@@ -1231,7 +1231,7 @@ public Action OnPlayerRunCmd(int iClient, int &iButtons, int &iImpulse, float fV
 	for (int i = 0; i <= 5; i++)
 	{
 		iWpnSlot = GetPlayerWeaponSlot(iClient, i);
-		iWpnSlots[i] = (!IsEntityExists(iWpnSlot) ? -1 : iWpnSlot);
+		iWpnSlots[i] = (!IsEntityWeapon(iWpnSlot) ? -1 : iWpnSlot);
 	}
 	g_iClientInventory[iClient] = iWpnSlots;
 
