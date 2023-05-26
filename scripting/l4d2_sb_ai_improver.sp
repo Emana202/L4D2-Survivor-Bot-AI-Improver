@@ -11,6 +11,15 @@
 #include <actions>
 #define REQUIRE_EXTENSIONS
 
+public Plugin myinfo = 
+{
+	name 		= "[L4D2] Survivor Bot AI Improver",
+	author 		= "Emana202",
+	description = "Attempt at improving survivor bots' AI and behaviour as much as possible.",
+	version 	= "1.2",
+	url 		= "https://forums.alliedmods.net/showthread.php?t=342872"
+}
+
 #define MAXENTITIES 				2048
 #define MAP_SCAN_TIMER_INTERVAL		2.0
 
@@ -467,15 +476,6 @@ static const char g_sBoneNames_New[][] =
 	"bip_knee_R",
 	"bip_foot_R"
 };
-
-public Plugin myinfo = 
-{
-	name 		= "[L4D2] Improved Survivor Bots AI & Behaviour",
-	author 		= "Emana202",
-	description = "Attempt at improving survivor bots' AI and behaviour as much as possible.",
-	version 	= "1.0",
-	url 		= "N/A"
-}
 
 static bool g_bLateLoad;
 static bool g_bExtensionActions;
