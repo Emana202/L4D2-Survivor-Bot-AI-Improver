@@ -16,7 +16,7 @@ public Plugin myinfo =
 	name 		= "[L4D2] Survivor Bot AI Improver",
 	author 		= "Emana202",
 	description = "Attempt at improving survivor bots' AI and behaviour as much as possible.",
-	version 	= "1.4",
+	version 	= "1.5",
 	url 		= "https://forums.alliedmods.net/showthread.php?t=342872"
 }
 
