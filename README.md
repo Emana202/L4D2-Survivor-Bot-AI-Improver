@@ -7,20 +7,24 @@ A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survi
 
 ---
 
-## Notable features
+## Notable Features
 - Bots now properly approach their melee target and switch between normal swings and bashing + ability for them to use chainsaws.
-- Bots can now pickup and use Tier 3 weapons without having to modify weapon scripts via plugin and etc.
-- You can set the weapon preferences for each survivor type (Coach, Zoey, etc.) using the "ib_pref_*" convars in the plugin's config.
+- Bots can now pickup and use Tier 3 weapons without having to modify weapon scripts via addons and plugins.
+- You can set the weapon preferences for each survivor type (Coach, Zoey, etc.) using the "ib_pref_*" convars in the game console or plugin's config.
+- If enabled, bots that are near witches will slowwalk if the witch isn't close to become enraged.
+- If enabled, when the survivor team has too many same types of grenades or sub-types of weapons, they will swap their to the one that isn't.
 - Improved and configurable item scavenging system
 - Bots now avoid moving through areas that are covered in spit or fire and try to find another way to get to their destination. They also react faster to getting spit under them and escape much efficiently.
-- Bots try to dodge the chargin' chargers and tank's rock that are thrown at them.
-- Bots now will deploy ammopacks if they have any primary weapon and defib dead survivors if they can
+- Bots will try to dodge the chargin' chargers and tank's rock that are thrown at them.
+- If enabled, bots now can deploy ammopacks if they have any primary weapon and defib dead survivors if they can.
+- Bots with shotguns will switch to their pistols if the target is too far away from them. Also, bots with sniper rifles now don't switch to pistols if target is close to them.
+- If enabled, bots with pump shotguns and CSS sniper rifles can shove upon firing to boost their firerate.
 - Bots shouldn't now completely ignore targets that are directly behind them and shoot at witch's feet at close range.
-- If the optional plugin is enabled, bots shouldn't now try to save a survivor if tanks are near them
+- If the optional Actions extension is installed, bots shouldn't now try to save a survivor if tanks are near them
 - Bots can now throw grenades at huge mob and tanks.
-- And many other features...
+- And other features that I forgot about due to too much work. Many of the features above can be disabled or tweaked in the config file.
 ---
-### Notable differences (copied from [Kerouha's currently unmaintained fork](https://github.com/Kerouha/L4D2-Survivor-Bot-AI-Improver/tree/experimental))
+### Notable Differences (blatantly copied from [Kerouha's currently unmaintained fork](https://github.com/Kerouha/L4D2-Survivor-Bot-AI-Improver/tree/experimental))
 - Bots will fire upon staggered Witch before she targets anyone ([video](https://youtu.be/jGsh1iDgqBw?t=11))
 - To resolve massive slowdowns in certain places (like when bots' path to wanted item is nav_blocked), function that calculates distance from a bot to an object was changed.
 - Bots are less likely commit absurd backtracking (or deviate far from main path) to grab items. Takes `ib_grab_distance`/`ib_grab_visible_distance` into account. Range is reduced depending on bot's health and amount of threats around.
