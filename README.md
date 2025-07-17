@@ -10,7 +10,7 @@ A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survi
 ## Notable Features
 - Bots now properly approach their melee target and switch between normal swings and bashing + ability for them to use chainsaws.
 - Bots can now pickup and use Tier 3 weapons without having to modify weapon scripts via addons and plugins.
-- You can set the weapon preferences for each survivor type (Coach, Zoey, etc.) using the "ib_pref_*" convars in the game console or plugin's config.
+- You can set the weapon preferences for each survivor type (Coach, Zoey, etc.) using the "ib_pref_\*" convars in the game console or plugin's config.
 - If enabled, bots that are near witches will slowwalk if the witch isn't close to become enraged.
 - If enabled, when the survivor team has too many same types of grenades or sub-types of weapons, they will swap their to the one that isn't.
 - Improved and configurable item scavenging system
@@ -53,6 +53,32 @@ A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survi
 4. If you chose to install Actions, extract the folders inside the archive to the "addons/sourcemod/" folder;
 5. Download the zip file of this repository;
 6. Put the "gamedata", "plugins", "data", and "scripting" folders inside "addons/sourcemod".
+
+---
+
+## Note for Left 4 Bots 2 Users
+If you're gonna use this plugin alongside [Left 4 Bots 2](https://steamcommunity.com/sharedfiles/filedetails/?id=3022416274) addon, the make sure to change some of its settings (located in "<game folder>/left4dead2/ems/left4bots2/cfg") so that it doesn't conflict with the plugin's:
+- Inside "weapons" folder, you'll find the addon's weapons preferences for each survivor. Open each text file with any editor and make sure that the lines with written weapons and items start with "\*,". For example:
+	- \*,sniper_military,hunting_rifle,rifle_ak47,rifle_sg552,rifle,rifle_desert,autoshotgun,shotgun_spas,rifle_m60,grenade_launcher,sniper_scout,sniper_awp,smg,smg_silenced,smg_mp5,shotgun_chrome,pumpshotgun
+	- \*,pistol_magnum,pistol,chainsaw,machete,golfclub,katana,fireaxe,crowbar,cricket_bat,baseball_bat,tonfa,shovel,electric_guitar,knife,frying_pan,pitchfork,riotshield
+	- \*,molotov,pipe_bomb,vomitjar
+	- \*,first_aid_kit,defibrillator,upgradepack_incendiary,upgradepack_explosive
+	- \*,pain_pills,adrenaline
+- In "settings.txt" or any text files inside that begins with it, change the listed settings to following:
+	- dodge_charger = 0
+	- dodge_rock = 0
+	- dodge_spit = 0
+	- shoot_rock = 0
+	- spit_block_nav = 0
+	- If you want to use this plugin's upgrade deploy feature (which currently is very WIP):
+		- deploy_upgrades = 0
+	- If you ever going to set some survivor's preference in this plugin to secondary weapon only:
+		- enforce_shotgun = 0
+		- enforce_sniper_rifle = 0
+	- If you want to use this plugin's grenade throw feature:
+		- throw_molotov = 0
+		- throw_pipebomb = 0
+		- throw_vomitjar = 0
 
 ---
 
