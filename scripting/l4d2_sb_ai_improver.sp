@@ -1,3 +1,33 @@
+/*======================================================================================
+	This is a modified version of Bot Improver
+	
+	Notable changes here:
+	
+	OnPlayerRunCmd()
+	SurvivorBotThink() - slight change for witch targeting, also changed item scavenge behavior
+	CheckEntityForStuff()
+	CheckForItemsToScavenge()
+	GetItemFromArray()
+	GetWeaponClassname()
+	GetWeaponMaxAmmo()
+	GetWeaponTier()
+	SurvivorHasPistol() and similar
+	GetSurvivorTeamInventoryCount() - new
+	GetClientDistanceToItem() - to replace GetEntityDistance()
+	L4D2_OnFindScavengeItem()
+	
+	GetNavDistance() - to replace GetVectorTravelDistance(). If you pass an entity ID to it, it will remember
+	if distance to the entity could not be measured, and won't hammer the server with more useless calculations. Yay!
+	
+	GetClientTravelDistance() - L4D2_IsReachable is used instead of L4D2_NavAreaBuildPath. It does essentially same thing,
+	outputs same boolean, and does not cause as much lag as the other function.
+	
+	LBI_IsReachablePosition() - argument to ignore LOS when picking nearest nav area.
+	LBI_IsPathToPositionDangerous() - L4D2_IsReachable is used instead of L4D2_NavAreaBuildPath. Additional cutoff for amount of processed nav areas.
+	DTR_OnFindUseEntity() - prevent bots from grabbing items from absurd distances.
+
+======================================================================================*/
+
 #pragma newdecls required
 #pragma semicolon 1
 
@@ -6,6 +36,8 @@
 #include <sdkhooks>
 #include <dhooks>
 #include <left4dhooks>
+#include <profiler>
+#include <adt_trie>
 
 #undef REQUIRE_EXTENSIONS
 #include <actions>
@@ -14,21 +46,86 @@
 public Plugin myinfo = 
 {
 	name 		= "[L4D2] Survivor Bot AI Improver",
-	author 		= "Emana202",
+	author 		= "Emana202, Kerouha",
 	description = "Attempt at improving survivor bots' AI and behaviour as much as possible.",
-	version 	= "1.5",
+	version 	= "1.6k",
 	url 		= "https://forums.alliedmods.net/showthread.php?t=342872"
 }
 
-#define MAXENTITIES 				2048
-#define MAP_SCAN_TIMER_INTERVAL		2.0
+#define MAXENTITIES 					2048
+#define MAP_SCAN_TIMER_INTERVAL			2.0
+#define MAX_MAP_RANGE_SQR				1073741824.0 // 32768, if interested
 
-#define BOT_BOOMER_AVOID_RADIUS_SQR		40000.0
-#define BOT_GRENADE_CHECK_RADIUS_SQR	90000.0
-#define BOT_CMD_MOVE_INTERVAL 		0.8
+#define BOT_BOOMER_AVOID_RADIUS_SQR		65536.0 	// 256
+#define BOT_GRENADE_CHECK_RADIUS_SQR	147456.0 	// 384
+#define BOT_CMD_MOVE_INTERVAL 			0.8
 
-#define HUMAN_HEIGHT				71.0
-#define HUMAN_HALF_HEIGHT			35.5
+#define HUMAN_HEIGHT					71.0
+#define HUMAN_HALF_HEIGHT				35.5
+
+#define DEBUG_NONE						0
+#define DEBUG_NAV						1 << 0
+#define DEBUG_MOVE						1 << 1
+#define DEBUG_SCAVENGE					1 << 2
+#define DEBUG_MISC						1 << 3
+//#define DEBUG_HUD						1 << 4
+#define DEBUG_WEP_DATA					1 << 5
+
+#define HUD_FLAG_ALIGN_LEFT				256
+#define HUD_FLAG_TEXT					8192
+#define HUD_FLAG_NOTVISIBLE				16384
+
+#define FLAG_NOITEM						0
+#define FLAG_ITEM						1 << 0
+#define FLAG_WEAPON						1 << 1
+#define FLAG_CSS						1 << 2
+#define FLAG_AMMO						1 << 3
+#define FLAG_UPGRADE					1 << 4
+#define FLAG_CARRY						1 << 5
+#define FLAG_MELEE						1 << 6
+#define FLAG_TIER1						1 << 7
+#define FLAG_TIER2						1 << 8
+#define FLAG_TIER3						1 << 9
+#define FLAG_PISTOL						1 << 10
+#define FLAG_PISTOL_EXTRA 				1 << 11
+#define FLAG_SMG						1 << 12
+#define FLAG_SHOTGUN					1 << 13
+#define FLAG_ASSAULT					1 << 14
+#define FLAG_SNIPER						1 << 15
+#define FLAG_CHAINSAW					1 << 16
+#define FLAG_GL							1 << 17
+#define FLAG_M60						1 << 18
+#define FLAG_HEAL						1 << 19
+#define FLAG_GREN						1 << 20
+#define FLAG_DEFIB						1 << 21
+#define FLAG_MEDKIT						1 << 22
+
+#define STATE_NEEDS_COVER				1 << 0
+#define STATE_NEEDS_AMMO				1 << 1
+#define STATE_NEEDS_WEAPON				1 << 2
+#define STATE_WOULD_HEAL				1 << 3
+#define STATE_WOULD_PICK_MELEE 			1 << 4
+#define STATE_WOULD_PICK_T3				1 << 5
+
+#define PICKUP_PIPE						1 << 0
+#define PICKUP_MOLO						1 << 1
+#define PICKUP_BILE						1 << 2
+#define PICKUP_MEDKIT					1 << 3
+#define PICKUP_DEFIB					1 << 4
+#define PICKUP_UPGRADE					1 << 5		//deployable ammo boxes
+#define PICKUP_PILLS					1 << 6
+#define PICKUP_ADREN					1 << 7
+#define PICKUP_LASER					1 << 8
+#define PICKUP_AMMOPACK 				1 << 9		//flame/frag rounds from deployed boxes
+#define PICKUP_AMMO						1 << 10
+#define PICKUP_CHAINSAW					1 << 11
+#define PICKUP_SECONDARY 				1 << 12
+#define PICKUP_PRIMARY					1 << 13
+
+//0: Disable, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defibrillator, 32: UpgradePack, 64: Pain Pills
+//128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons
+
+static char IBWeaponName[56][32];
 
 enum
 {
@@ -55,11 +152,12 @@ enum
 static ConVar g_hCvar_GameDifficulty; 
 static ConVar g_hCvar_SurvivorLimpHealth;
 static ConVar g_hCvar_TankRockHealth;
-static ConVar g_hCvar_GasCanUseDuration;
 static ConVar g_hCvar_ChaseBileRange;
 static ConVar g_hCvar_ServerGravity;
 static ConVar g_hCvar_BileCoverDuration_Bot;
 static ConVar g_hCvar_BileCoverDuration_PZ;
+static ConVar g_hCvar_ShovePenaltyMin_Coop;
+static ConVar g_hCvar_ShovePenaltyMin_Versus;
 
 static ConVar g_hCvar_MaxMeleeSurvivors; 
 static ConVar g_hCvar_BotsShootThrough;
@@ -71,11 +169,11 @@ static ConVar g_hCvar_BotsVomitBlindTime;
 static char g_sCvar_GameDifficulty[12]; 
 static int g_iCvar_SurvivorLimpHealth; 
 static int g_iCvar_TankRockHealth; 
-static float g_fCvar_GasCanUseDuration; 
 static float g_fCvar_ChaseBileRange; 
 static float g_fCvar_ServerGravity; 
 static float g_fCvar_BileCoverDuration_Bot;
 static float g_fCvar_BileCoverDuration_PZ;
+static int g_iCvar_ShovePenaltyMin;
 
 static int g_iCvar_MaxMeleeSurvivors; 
 static bool g_bCvar_BotsShootThrough;
@@ -84,7 +182,7 @@ static bool g_bCvar_BotsDisabled;
 static bool g_bCvar_BotsDontShoot;
 static float g_fCvar_BotsVomitBlindTime;
 
-/*============ MELEE RELATED CONVARS =================================================================*/
+/*============ AMMO RELATED CONVARS =================================================================*/
 static ConVar g_hCvar_MaxAmmo_Pistol;
 static ConVar g_hCvar_MaxAmmo_AssaultRifle;
 static ConVar g_hCvar_MaxAmmo_SMG;
@@ -102,6 +200,7 @@ static ConVar g_hCvar_MaxAmmo_Adrenaline;
 static ConVar g_hCvar_MaxAmmo_Chainsaw;
 static ConVar g_hCvar_MaxAmmo_AmmoPack;
 static ConVar g_hCvar_MaxAmmo_Medkit;
+static ConVar g_hCvar_Ammo_Type_Override;
 
 static int g_iCvar_MaxAmmo_Pistol;
 static int g_iCvar_MaxAmmo_AssaultRifle;
@@ -120,6 +219,7 @@ static int g_iCvar_MaxAmmo_Adrenaline;
 static int g_iCvar_MaxAmmo_Chainsaw;
 static int g_iCvar_MaxAmmo_AmmoPack;
 static int g_iCvar_MaxAmmo_Medkit;
+static char g_sCvar_Ammo_Type_Override[32];
 
 /*============ MELEE RELATED CONVARS =================================================================*/
 static ConVar g_hCvar_ImprovedMelee_MaxCount;
@@ -137,8 +237,9 @@ static int g_iCvar_ImprovedMelee_SwitchCount;
 static int g_iCvar_ImprovedMelee_ShoveChance; 
 static float g_fCvar_ImprovedMelee_SwitchRange; 
 static float g_fCvar_ImprovedMelee_ApproachRange;
-static float g_fCvar_ImprovedMelee_AimRange;
+static float g_fCvar_ImprovedMelee_AimRange_Sqr;
 static float g_fCvar_ImprovedMelee_AttackRange;
+static float g_fCvar_ImprovedMelee_AttackRange_Sqr;
 
 static ConVar g_hCvar_ImprovedMelee_ChainsawLimit;
 static ConVar g_hCvar_ImprovedMelee_SwitchCount2;
@@ -170,7 +271,7 @@ static float g_fCvar_Vision_NoticeTimeScale;
 static ConVar g_hCvar_TankRock_ShootEnabled;
 static ConVar g_hCvar_TankRock_ShootRange;
 static bool g_bCvar_TankRock_ShootEnabled;
-static float g_fCvar_TankRock_ShootRange;
+static float g_fCvar_TankRock_ShootRange_Sqr;
 /*============ SAVE RELATED CONVARS ==================================================================*/
 static ConVar g_hCvar_AutoShove_Enabled;
 static int g_iCvar_AutoShove_Enabled;
@@ -184,8 +285,9 @@ static ConVar g_hCvar_HelpPinnedFriend_Enabled;
 static ConVar g_hCvar_HelpPinnedFriend_ShootRange;
 static ConVar g_hCvar_HelpPinnedFriend_ShoveRange;
 static int g_iCvar_HelpPinnedFriend_Enabled;
-static float g_fCvar_HelpPinnedFriend_ShootRange;
-static float g_fCvar_HelpPinnedFriend_ShoveRange;
+//static float g_fCvar_HelpPinnedFriend_ShootRange;
+static float g_fCvar_HelpPinnedFriend_ShootRange_Sqr;
+static float g_fCvar_HelpPinnedFriend_ShoveRange_Sqr;
 /*============ WEAPON RELATED CONVARS ================================================================*/
 static ConVar g_hCvar_BotWeaponPreference_ForceMagnum;
 static bool g_bCvar_BotWeaponPreference_ForceMagnum;
@@ -210,12 +312,14 @@ static int g_iCvar_BotWeaponPreference_Bill;
 /*----------------------------------------------------------------------------------------------------*/
 static ConVar g_hCvar_SwapSameTypePrimaries;
 static bool g_bCvar_SwapSameTypePrimaries;
-/*----------------------------------------------------------------------------------------------------*/
+/*------------ TIER 3 --------------------------------------------------------------------------------*/
 static ConVar g_hCvar_MaxWeaponTier3_M60;
 static ConVar g_hCvar_MaxWeaponTier3_GLauncher;
+static ConVar g_hCvar_T3_Refill;
 
 static int g_iCvar_MaxWeaponTier3_M60;
 static int g_iCvar_MaxWeaponTier3_GLauncher;
+static int g_iCvar_T3_Refill;
 
 /*============ GRENADE RELATED CONVARS ===============================================================*/
 static ConVar g_hCvar_GrenadeThrow_Enabled;
@@ -228,6 +332,8 @@ static ConVar g_hCvar_GrenadeThrow_NextThrowTime2;
 static bool g_bCvar_GrenadeThrow_Enabled;
 static int g_iCvar_GrenadeThrow_GrenadeTypes; 
 static float g_fCvar_GrenadeThrow_ThrowRange; 
+static float g_fCvar_GrenadeThrow_ThrowRange_Sqr; 
+static float g_fCvar_GrenadeThrow_ThrowRange_NoVisCheck; 
 static float g_fCvar_GrenadeThrow_HordeSize; 
 static float g_fCvar_GrenadeThrow_NextThrowTime1;
 static float g_fCvar_GrenadeThrow_NextThrowTime2;
@@ -240,9 +346,10 @@ static ConVar g_hCvar_DefibRevive_Enabled;
 static ConVar g_hCvar_DefibRevive_ScanDist; 
 
 static bool g_bCvar_DefibRevive_Enabled; 
-static float g_fCvar_DefibRevive_ScanDist;
+static float g_fCvar_DefibRevive_ScanDist_Sqr;
 
 /*============ ITEM SCAVENGE RELATED CONVARS =========================================================*/
+static ConVar g_hCvar_ItemScavenge_Models; 
 static ConVar g_hCvar_ItemScavenge_Items; 
 static ConVar g_hCvar_ItemScavenge_ApproachRange; 
 static ConVar g_hCvar_ItemScavenge_ApproachVisibleRange; 
@@ -250,11 +357,13 @@ static ConVar g_hCvar_ItemScavenge_PickupRange;
 static ConVar g_hCvar_ItemScavenge_MapSearchRange; 
 static ConVar g_hCvar_ItemScavenge_NoHumansRangeMultiplier; 
 
+static int g_iCvar_ItemScavenge_Models;
 static int g_iCvar_ItemScavenge_Items;
 static float g_fCvar_ItemScavenge_ApproachRange;
 static float g_fCvar_ItemScavenge_ApproachVisibleRange;
 static float g_fCvar_ItemScavenge_PickupRange;
-static float g_fCvar_ItemScavenge_MapSearchRange;
+static float g_fCvar_ItemScavenge_PickupRange_Sqr;
+static float g_fCvar_ItemScavenge_MapSearchRange_Sqr;
 static float g_fCvar_ItemScavenge_NoHumansRangeMultiplier;
 
 /*============ WITCH RELATED CONVARS =========================================================*/
@@ -269,19 +378,22 @@ static ConVar g_hCvar_NextProcessTime;
 static float g_fCvar_NextProcessTime;
 
 /*============ MISC CONVARS =========================================================*/
-static ConVar g_hCvar_AlwaysCarryProp;
-static ConVar g_hCvar_SpitterAcidEvasion;
+// static ConVar g_hCvar_AlwaysCarryProp;
+static ConVar g_hCvar_AcidEvasion;
 static ConVar g_hCvar_SwitchOffCSSWeapons;
-static ConVar g_hCvar_KeepMovingInCombat;
+// static ConVar g_hCvar_KeepMovingInCombat;
 static ConVar g_hCvar_ChargerEvasion;
 static ConVar g_hCvar_DeployUpgradePacks;
 static ConVar g_hCvar_DontSwitchToPistol;
 static ConVar g_hCvar_TakeCoverFromRocks;
 static ConVar g_hCvar_AvoidTanksWithProp;
 static ConVar g_hCvar_NoFallDmgOnLadderFail;
+static ConVar g_hCvar_HasEnoughAmmoRatio;
 
-static bool g_bCvar_SpitterAcidEvasion;
-static bool g_bCvar_AlwaysCarryProp;
+static ConVar g_hCvar_Nightmare;
+
+static bool g_bCvar_AcidEvasion;
+// static bool g_bCvar_AlwaysCarryProp;
 static bool g_bCvar_SwitchOffCSSWeapons;
 static bool g_bCvar_ChargerEvasion;
 static bool g_bCvar_DeployUpgradePacks;
@@ -289,90 +401,114 @@ static bool g_bCvar_DontSwitchToPistol;
 static bool g_bCvar_TakeCoverFromRocks;
 static bool g_bCvar_AvoidTanksWithProp;
 static bool g_bCvar_NoFallDmgOnLadderFail;
+static float g_fCvar_HasEnoughAmmoRatio;
+
+static bool g_bCvar_Nightmare;
 
 /*============ VARIABLES =========================================================*/
-static float g_fSurvivorBot_NextPressAttackTime[MAXPLAYERS+1];
-
-static int g_iSurvivorBot_TargetInfected[MAXPLAYERS+1];
-static int g_iSurvivorBot_IncapacitatedFriend[MAXPLAYERS+1];
-static int g_iSurvivorBot_PinnedFriend[MAXPLAYERS+1];
-
-static int g_iSurvivorBot_WitchTarget[MAXPLAYERS+1];
-static bool g_bSurvivorBot_IsWitchHarasser[MAXPLAYERS+1];
-
-static bool g_bSurvivorBot_PreventFire[MAXPLAYERS+1];
-
 static bool g_bClient_IsLookingAtPosition[MAXPLAYERS+1];
 static bool g_bClient_IsFiringWeapon[MAXPLAYERS+1];
 
-static int g_iSurvivorBot_ScavengeItem[MAXPLAYERS+1];
-static float g_fSurvivorBot_NextUsePressTime[MAXPLAYERS+1];
-static float g_fSurvivorBot_NextScavengeItemScanTime[MAXPLAYERS+1];
+// -------------------------
 
-static float g_fSurvivorBot_VomitBlindedTime[MAXPLAYERS+1];
+static bool g_bBot_PreventFire[MAXPLAYERS+1];
+static bool g_bBot_IsWitchHarasser[MAXPLAYERS+1];
+static bool g_bBot_ForceBash[MAXPLAYERS+1];
+static bool g_bBot_ForceSwitchWeapon[MAXPLAYERS+1];
+static bool g_bBot_ForceWeaponReload[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_NextMoveCommandTime[MAXPLAYERS+1];
+static bool g_bBot_IsFriendNearBoomer[MAXPLAYERS+1];
+static bool g_bBot_IsFriendNearThrowArea[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_BlockWeaponSwitchTime[MAXPLAYERS+1];
-static float g_fSurvivorBot_BlockWeaponReloadTime[MAXPLAYERS+1];
+static float g_fBot_NextPressAttackTime[MAXPLAYERS+1];
+static float g_fBot_VomitBlindedTime[MAXPLAYERS+1];
+static float g_fBot_PinnedReactTime[MAXPLAYERS+1];
+static float g_fBot_NextWeaponRangeSwitchTime[MAXPLAYERS+1];
+static float g_fBot_NextMoveCommandTime[MAXPLAYERS+1];
+static float g_fBot_TimeSinceLeftLadder[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_MeleeApproachTime[MAXPLAYERS+1];
-static float g_fSurvivorBot_MeleeAttackTime[MAXPLAYERS+1];
+static float g_fBot_BlockWeaponSwitchTime[MAXPLAYERS+1];
+static float g_fBot_BlockWeaponReloadTime[MAXPLAYERS+1];
+static float g_fBot_BlockWeaponAttackTime[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_TimeSinceLeftLadder[MAXPLAYERS+1];
+static int g_iBot_TargetInfected[MAXPLAYERS+1];
+static int g_iBot_PinnedFriend[MAXPLAYERS+1];
+static int g_iBot_WitchTarget[MAXPLAYERS+1];
+static int g_iBot_DefibTarget[MAXPLAYERS+1];
+static int g_iBot_IncapacitatedFriend[MAXPLAYERS+1];
 
-static int g_iSurvivorBot_DefibTarget[MAXPLAYERS+1];
+static int g_iBot_TankTarget[MAXPLAYERS+1];
+static int g_iBot_TankRock[MAXPLAYERS+1];
+static int g_iBot_TankProp[MAXPLAYERS+1];
 
-static int g_iSurvivorBot_Grenade_ThrowTarget[MAXPLAYERS+1];
-static float g_fSurvivorBot_Grenade_ThrowPos[MAXPLAYERS+1][3];
-static float g_fSurvivorBot_Grenade_AimPos[MAXPLAYERS+1][3];
+static int g_iBot_ScavengeItem[MAXPLAYERS+1];
+static float g_fBot_ScavengeItemDist[MAXPLAYERS+1];
+static float g_fBot_NextScavengeItemScanTime[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_Grenade_NextThrowTime;
-static float g_fSurvivorBot_Grenade_NextThrowTime_Molotov;
+static float g_fBot_MeleeAttackTime[MAXPLAYERS+1];
+static float g_fBot_MeleeApproachTime[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_LookPosition[MAXPLAYERS+1][3];
-static float g_fSurvivorBot_LookPosition_Duration[MAXPLAYERS+1];
+static int g_iBot_Grenade_ThrowTarget[MAXPLAYERS+1];
+static float g_fBot_Grenade_ThrowPos[MAXPLAYERS+1][3];
+static float g_fBot_Grenade_AimPos[MAXPLAYERS+1][3];
 
-static float g_fSurvivorBot_MovePos_Position[MAXPLAYERS+1][3];
-static float g_fSurvivorBot_MovePos_Duration[MAXPLAYERS+1];
-static int g_iSurvivorBot_MovePos_Priority[MAXPLAYERS+1];
-static float g_fSurvivorBot_MovePos_Tolerance[MAXPLAYERS+1];
-static bool g_bSurvivorBot_MovePos_IgnoreDamaging[MAXPLAYERS+1];
-static char g_sSurvivorBot_MovePos_Name[MAXPLAYERS+1][512];
+static float g_fBot_Grenade_NextThrowTime;
+static float g_fBot_Grenade_NextThrowTime_Molotov;
 
-static bool g_bSurvivorBot_ForceSwitchWeapon[MAXPLAYERS+1];
-static bool g_bSurvivorBot_ForceBash[MAXPLAYERS+1];
+static float g_fBot_LookPosition[MAXPLAYERS+1][3];
+static float g_fBot_LookPosition_Duration[MAXPLAYERS+1];
 
-static float g_fSurvivorBot_PinnedReactTime[MAXPLAYERS+1];
+static float g_fBot_MovePos_Position[MAXPLAYERS+1][3];
+static float g_fBot_MovePos_Duration[MAXPLAYERS+1];
+static int g_iBot_MovePos_Priority[MAXPLAYERS+1];
+static float g_fBot_MovePos_Tolerance[MAXPLAYERS+1];
+static bool g_bBot_MovePos_IgnoreDamaging[MAXPLAYERS+1];
+static char g_sBot_MovePos_Name[MAXPLAYERS+1][64];
 
-static int g_iSurvivorBot_NearbyInfectedCount[MAXPLAYERS+1]; 
-static int g_iSurvivorBot_NearestInfectedCount[MAXPLAYERS+1]; 
-static int g_iSurvivorBot_ThreatInfectedCount[MAXPLAYERS+1]; 
-static int g_iSurvivorBot_GrenadeInfectedCount[MAXPLAYERS+1];
+static int g_iBot_NearbyFriends[MAXPLAYERS+1];
+static int g_iBot_NearbyInfectedCount[MAXPLAYERS+1]; 
+static int g_iBot_NearestInfectedCount[MAXPLAYERS+1]; 
+static int g_iBot_ThreatInfectedCount[MAXPLAYERS+1]; 
+static int g_iBot_GrenadeInfectedCount[MAXPLAYERS+1];
 
-static int g_iSurvivorBot_VisionMemory_State[MAXPLAYERS+1][MAXENTITIES+1];
-static int g_iSurvivorBot_VisionMemory_State_FOV[MAXPLAYERS+1][MAXENTITIES+1];
+static int g_iBot_VisionMemory_State[MAXPLAYERS+1][MAXENTITIES+1];
+static int g_iBot_VisionMemory_State_FOV[MAXPLAYERS+1][MAXENTITIES+1];
+static float g_fBot_VisionMemory_Time[MAXPLAYERS+1][MAXENTITIES+1];
+static float g_fBot_VisionMemory_Time_FOV[MAXPLAYERS+1][MAXENTITIES+1];
 
-static float g_fSurvivorBot_VisionMemory_Time[MAXPLAYERS+1][MAXENTITIES+1];
-static float g_fSurvivorBot_VisionMemory_Time_FOV[MAXPLAYERS+1][MAXENTITIES+1];
-
-static float g_fSurvivorBot_NextWeaponRangeSwitchTime[MAXPLAYERS+1];
-
-static bool g_bSurvivorBot_ForceWeaponReload[MAXPLAYERS+1];
-
-static int g_iSurvivorBot_NearbyFriends[MAXPLAYERS+1];
-
-static int g_iBotProcessing_ProcessedCount;
-static bool g_bBotProcessing_IsProcessed[MAXPLAYERS+1];
-static float g_fBotProcessing_NextProcessTime;
+// -------------------------
 
 static int g_iInfectedBot_CurrentVictim[MAXPLAYERS+1];
 static bool g_bInfectedBot_IsThrowing[MAXPLAYERS+1];
 static float g_fInfectedBot_CoveredInVomitTime[MAXPLAYERS+1];
 
+// ----------------------------------------------------------------------------------------------------
+
 static bool g_bMapStarted;
-static bool g_bCutsceneIsPlaying;
 static char g_sCurrentMapName[128];
+static bool g_bCutsceneIsPlaying;
+static bool g_bTeamHasHumanPlayer;
+static bool g_bHasLeft4Bots;
+
+static int g_iBotProcessing_ProcessedCount;
+static float g_fBotProcessing_NextProcessTime;
+static bool g_bBotProcessing_IsProcessed[MAXPLAYERS+1];
+
+// ----------------------------------------------------------------------------------------------------
+// DEBUG / TESTING
+// ----------------------------------------------------------------------------------------------------
+static ConVar g_hCvar_Debug;
+static int g_iCvar_Debug;
+static int g_iCvar_DebugClient;
+
+//static int g_iTester;
+//static int g_iTeamLeader;
+//static int g_iTimesPostponed;
+//static int g_iTestSubject;
+
+//static Handle g_hDebugHUDTimer;
+
+Profiler g_pProf;
 
 // ----------------------------------------------------------------------------------------------------
 // CLIENT GLOBAL DATA
@@ -383,35 +519,50 @@ static float g_fClientAbsOrigin[MAXPLAYERS+1][3];
 static float g_fClientCenteroid[MAXPLAYERS+1][3];
 static int g_iClientNavArea[MAXPLAYERS+1];
 static int g_iClientInventory[MAXPLAYERS+1][6];
+static int g_iClientInvFlags[MAXPLAYERS+1];
+//static int g_iClientState[MAXPLAYERS+1];
 
 // ----------------------------------------------------------------------------------------------------
 // WEAPON GLOBAL DATA
 // ----------------------------------------------------------------------------------------------------
+static bool g_bInitCheckCases;
+static bool g_bInitItemFlags;
+static bool g_bInitMaxAmmo;
+static bool g_bInitWeaponMap;
+static bool g_bInitMeleeIDs;
+static bool g_bInitMeleePrefs;
+
+static bool g_bIsSemiAuto[56];
+static int g_iWeaponID[MAXENTITIES+1];
+static int g_iMeleeID[MAXENTITIES+1];
+static int g_iMeleePreference[17];
+static int g_iItemFlags[MAXENTITIES+1];
+static int g_iMaxAmmo[56];
+static int g_iWeaponTier[56];
 static int g_iWeapon_Clip1[MAXENTITIES+1];
 static int g_iWeapon_MaxAmmo[MAXENTITIES+1]; 
 static int g_iWeapon_AmmoLeft[MAXENTITIES+1];
 static int g_iItem_Used[MAXENTITIES+1]; // To fix bots grabbing same ammo upgrade repeatedly
 
+static Handle g_hCheckWeaponTimer;
+
 // ----------------------------------------------------------------------------------------------------
-// MELEE WEAPON MODELS
+// LOOKUP HASH MAPS
 // ----------------------------------------------------------------------------------------------------
-static const char g_sMeleeWeaponMdls[][] =
-{
-	"models/weapons/melee/w_katana.mdl",
-	"models/weapons/melee/w_fireaxe.mdl",
-	"models/weapons/melee/w_machete.mdl",
-	"models/weapons/melee/w_electric_guitar.mdl",
-	"models/weapons/melee/w_tonfa.mdl",
-	"models/weapons/melee/w_golfclub.mdl",
-	"models/weapons/melee/w_bat.mdl",
-	"models/weapons/melee/w_cricket_bat.mdl",
-	"models/weapons/melee/w_frying_pan.mdl",
-	"models/weapons/melee/w_crowbar.mdl",
-	"models/w_models/weapons/w_knife_t.mdl",
-	"models/weapons/melee/w_shovel.mdl",
-	"models/weapons/melee/w_pitchfork.mdl",
-	"models/weapons/melee/w_riotshield.mdl"
-};
+StringMap g_hItemFlagMap;
+StringMap g_hWeaponMap;
+StringMap g_hWeaponMdlMap;
+StringMap g_hWeaponToIDMap;
+StringMap g_hCheckCases;
+StringMap g_hMeleeIDs;
+StringMap g_hMeleeMdlToID;
+StringMap g_hMeleePref;
+
+// ----------------------------------------------------------------------------------------------------
+// DATA FILES
+// ----------------------------------------------------------------------------------------------------
+static int g_iDataFileSection;
+static int g_iDataFileValueID;
 
 // ----------------------------------------------------------------------------------------------------
 // ENTITY ARRAYLISTS
@@ -434,8 +585,17 @@ static ArrayList g_hAdrenalineList;
 static ArrayList g_hAmmopileList;
 static ArrayList g_hLaserSightList;
 static ArrayList g_hDeployedAmmoPacks;
+static ArrayList g_hForbiddenItemList;
+static ArrayList g_hWeaponsToCheckLater;
 
 static ArrayList g_hWitchList;
+
+// ----------------------------------------------------------------------------------------------------
+// PREVENT REPEATED UNSUCCESSFUL PATH DISTANCE CALCULATION
+// ----------------------------------------------------------------------------------------------------
+static ArrayList g_hBadPathEntities;
+static Handle g_hClearBadPathTimer;
+
 // ----------------------------------------------------------------------------------------------------
 // CHARACTER MODEL BONES
 // ----------------------------------------------------------------------------------------------------
@@ -510,16 +670,25 @@ public void OnPluginStart()
 	CreateAllDetours(hGameConfig);
 
 	delete hGameConfig;
+	
+	// ----------------------------------------------------------------------------------------------------
+	// DATA / PREFERENCES
+	// ----------------------------------------------------------------------------------------------------
+	
+	ParseDataFile();
 
 	// ----------------------------------------------------------------------------------------------------
 	// EVENT HOOKS
 	// ----------------------------------------------------------------------------------------------------
 	HookEvent("round_start", 			Event_OnRoundStart);
-	HookEvent("round_end", 				Event_OnRoundEnd);
 
 	HookEvent("weapon_fire", 			Event_OnWeaponFire);
 	HookEvent("player_death", 			Event_OnPlayerDeath);
 	HookEvent("player_use",				Event_OnPlayerUse);
+	
+	HookEvent("player_incapacitated_start",	Event_OnIncap);
+	HookEvent("revive_success",			Event_OnRevive);
+	HookEvent("defibrillator_used",		Event_OnRevive);
 	
 	HookEvent("lunge_pounce", 			Event_OnSurvivorGrabbed);
 	HookEvent("tongue_grab", 			Event_OnSurvivorGrabbed);
@@ -529,6 +698,9 @@ public void OnPluginStart()
 	HookEvent("charger_charge_start",	Event_OnChargeStart);
 	
 	HookEvent("witch_harasser_set", 	Event_OnWitchHaraserSet);
+	
+	RegAdminCmd("sm_ibcvars",	CmdDumpCvars,	ADMFLAG_GENERIC, "Dump some cvars");
+	//RegAdminCmd("sm_ibsubject",	CmdSetTestSubj, ADMFLAG_GENERIC, "Set player to test against");
 
 	// ----------------------------------------------------------------------------------------------------
 	// CONSOLE VARIABLES
@@ -549,6 +721,14 @@ public void OnPluginStart()
 	}
 
 	g_bExtensionActions = LibraryExists("actionslib");
+	
+	g_pProf = CreateProfiler();
+	
+	if (!g_bInitItemFlags)
+	{
+		InitItemFlagMap();
+		PrintToServer("OnPluginStart: init g_hItemFlagMap");
+	}
 }
 
 void CreateAndHookConVars()
@@ -556,11 +736,12 @@ void CreateAndHookConVars()
 	g_hCvar_GameDifficulty 							= FindConVar("z_difficulty");
 	g_hCvar_SurvivorLimpHealth 						= FindConVar("survivor_limp_health");
 	g_hCvar_TankRockHealth 							= FindConVar("z_tank_throw_health");
-	g_hCvar_GasCanUseDuration 						= FindConVar("gas_can_use_duration");
 	g_hCvar_ChaseBileRange							= FindConVar("z_notice_it_range");
 	g_hCvar_ServerGravity							= FindConVar("sv_gravity");
 	g_hCvar_BileCoverDuration_Bot					= FindConVar("vomitjar_duration_infected_bot");
 	g_hCvar_BileCoverDuration_PZ					= FindConVar("vomitjar_duration_infected_pz");
+	g_hCvar_ShovePenaltyMin_Coop					= FindConVar("z_gun_swing_coop_min_penalty");
+	g_hCvar_ShovePenaltyMin_Versus					= FindConVar("z_gun_swing_vs_min_penalty");
 
 	g_hCvar_MaxMeleeSurvivors 						= FindConVar("sb_max_team_melee_weapons");
 	g_hCvar_BotsShootThrough 						= FindConVar("sb_allow_shoot_through_survivors");
@@ -586,98 +767,109 @@ void CreateAndHookConVars()
 	g_hCvar_MaxAmmo_Chainsaw						= FindConVar("ammo_chainsaw_max");
 	g_hCvar_MaxAmmo_AmmoPack						= FindConVar("ammo_ammo_pack_max");
 	g_hCvar_MaxAmmo_Medkit							= FindConVar("ammo_firstaid_max");
-
-	g_hCvar_ImprovedMelee_Enabled 					= CreateConVar("l4d2_improvedbots_melee_enabled", "1", "Enables survivor bots' improved melee behaviour.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_ImprovedMelee_MaxCount 					= CreateConVar("l4d2_improvedbots_melee_max_team", "1", "The total number of melee weapons allowed on the team. <0: Bots never use melee>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_SwitchCount 				= CreateConVar("l4d2_improvedbots_melee_switch_count", "3", "The nearby infected count required for bot to switch to their melee weapon.", FCVAR_NOTIFY, true, 1.0);
-	g_hCvar_ImprovedMelee_SwitchRange 				= CreateConVar("l4d2_improvedbots_melee_switch_range", "250", "Range at which bot's target should be to switch to melee weapon.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_ApproachRange				= CreateConVar("l4d2_improvedbots_melee_approach_range", "400", "Range at which bot's target should be to approach it. <0: Disable Approaching>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_AimRange 					= CreateConVar("l4d2_improvedbots_melee_aim_range", "125", "Range at which bot's target should be to start taking aim at it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_AttackRange 				= CreateConVar("l4d2_improvedbots_melee_attack_range", "70", "Range at which bot's target should be to start attacking it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_ShoveChance 				= CreateConVar("l4d2_improvedbots_melee_shove_chance", "4", "Chance for bot to bash target instead of attacking with melee. <0: Disable Bashing>", FCVAR_NOTIFY, true, 0.0);
-
-	g_hCvar_ImprovedMelee_ChainsawLimit 			= CreateConVar("l4d2_improvedbots_melee_chainsaw_limit", "1", "The total number of chainsaws allowed on the team. <0: Bots never use chainsaw>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ImprovedMelee_SwitchCount2 				= CreateConVar("l4d2_improvedbots_melee_chainsaw_switch_count", "6", "The nearby infected count required for bot to switch to chainsaw.", FCVAR_NOTIFY, true, 1.0);
-
-	g_hCvar_TargetSelection_Enabled					= CreateConVar("l4d2_improvedbots_targetselection_enabled", "1", "Enables survivor bots' improved target selection.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_TargetSelection_ShootRange				= CreateConVar("l4d2_improvedbots_targetselection_shootrange", "2000", "Range at which target need to be for bots to start firing at it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_TargetSelection_ShootRange2				= CreateConVar("l4d2_improvedbots_targetselection_shootrange_shotgun", "750", "Range at which target need to be for bots to start firing at it with shotgun.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_TargetSelection_ShootRange3				= CreateConVar("l4d2_improvedbots_targetselection_shootrange_sniperrifle", "3000", "Range at which target need to be for bots to start firing at it with sniper rifle.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_TargetSelection_ShootRange4				= CreateConVar("l4d2_improvedbots_targetselection_shootrange_pistol", "1500", "Range at which target need to be for bots to start firing at it with secondary weapon.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_TargetSelection_IgnoreDociles			= CreateConVar("l4d2_improvedbots_targetselection_ignoredociles", "1", "If bots shouldn't target common infected that are currently not attacking survivors.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-	g_hCvar_GrenadeThrow_Enabled 					= CreateConVar("l4d2_improvedbots_grenadethrowing_enabled", "1", "Enables survivor bots throwing grenades.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_GrenadeThrow_GrenadeTypes				= CreateConVar("l4d2_improvedbots_grenadethrowing_grenadetypes", "7", "What grenades should survivor bots throw? <1: Pipe-Bomb, 2: Molotov, 4: Bile Bomb. Add numbers together.>", FCVAR_NOTIFY, true, 1.0, true, 7.0);
-	g_hCvar_GrenadeThrow_ThrowRange					= CreateConVar("l4d2_improvedbots_grenadethrowing_throw_range", "1500", "Range at which target needs to be for bot to throw grenade at it.", FCVAR_NOTIFY);
-	g_hCvar_GrenadeThrow_HordeSize 					= CreateConVar("l4d2_improvedbots_grenadethrowing_horde_size_multiplier", "3.75", "Infected count required to throw grenade Multiplier (Value * SurvivorCount).", FCVAR_NOTIFY, true, 1.0);
-	g_hCvar_GrenadeThrow_NextThrowTime1 			= CreateConVar("l4d2_improvedbots_grenadethrowing_next_throw_time_min", "20", "First number to pick to randomize next grenade throw time.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_GrenadeThrow_NextThrowTime2 			= CreateConVar("l4d2_improvedbots_grenadethrowing_next_throw_time_max", "30", "Second number to pick to randomize next grenade throw time.", FCVAR_NOTIFY, true, 0.0);
-
-	g_hCvar_TankRock_ShootEnabled 					= CreateConVar("l4d2_improvedbots_shootattankrocks_enabled", "1", "Enables survivor bots shooting tank's thrown rocks.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_TankRock_ShootRange 					= CreateConVar("l4d2_improvedbots_shootattankrocks_range", "1500", "Range at which rock needs to be for bot to start shooting at it.", FCVAR_NOTIFY, true, 0.0);
-
-	g_hCvar_AutoShove_Enabled						= CreateConVar("l4d2_improvedbots_autoshove_enabled", "1", "Makes survivor bots automatically shove every nearby infected. <0: Disabled, 1: All infected, 2: Only if infected is behind them>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
-
-	g_hCvar_HelpPinnedFriend_Enabled				= CreateConVar("l4d2_improvedbots_help_pinnedfriend_enabled", "3", "Makes survivor bots force attack pinned survivor's SI if possible. <0: Disabled, 1: Shoot at attacker, 2: Shove the attacker if close enough. Add numbers together.>", FCVAR_NOTIFY, true, 0.0, true, 3.0);
-	g_hCvar_HelpPinnedFriend_ShootRange				= CreateConVar("l4d2_improvedbots_help_pinnedfriend_shootrange", "2000", "Range at which bots will start firing at SI.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_HelpPinnedFriend_ShoveRange				= CreateConVar("l4d2_improvedbots_help_pinnedfriend_shoverange", "75", "Range at which bots will start to bash SI.", FCVAR_NOTIFY), true, 0.0;
-
-	g_hCvar_DefibRevive_Enabled						= CreateConVar("l4d2_improvedbots_defib_revive_enabled", "1", "Enable bots reviving dead players with defibrillators if they have one available.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_DefibRevive_ScanDist 					= CreateConVar("l4d2_improvedbots_defib_revive_distance", "2000", "Range at which survivor's dead body should be for bot to consider it reviveable.", FCVAR_NOTIFY, true, 0.0);
-
-	g_hCvar_FireBash_Chance1						= CreateConVar("l4d2_improvedbots_fireshove_chance_pumpshotguns", "4", "Chance at which survivor bot may shove after firing a pump-action shotgun. <0: Disabled, 1: Always>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_FireBash_Chance2						= CreateConVar("l4d2_improvedbots_fireshove_chance_css_sniperrifles", "3", "Chance at which survivor bot may shove after firing a bolt-action sniper rifle. <0: Disabled, 1: Always>", FCVAR_NOTIFY, true, 0.0);
 	
-	g_hCvar_ItemScavenge_Items 						= CreateConVar("l4d2_improvedbots_itemscavenge_enabled", "16383", "Enable improved bot item scavenging for specified items. <0: Disable, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defibrillator, 32: UpgradePack, 64: Pain Pills, 128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons. Add numbers together>", FCVAR_NOTIFY, true, 0.0, true, 16383.0);
-	g_hCvar_ItemScavenge_ApproachRange 				= CreateConVar("l4d2_improvedbots_itemscavenge_scavenge_distance", "300", "Distance at which item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_ApproachVisibleRange 		= CreateConVar("l4d2_improvedbots_itemscavenge_scavenge_visible_distance", "600", "Distance at which a visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_PickupRange 				= CreateConVar("l4d2_improvedbots_itemscavenge_pickup_distance", "100", "Distance at which item should be for bot to able to pick it up.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_MapSearchRange 			= CreateConVar("l4d2_improvedbots_itemscavenge_mapsearchdistance", "2500", "How close should the item be to the survivor bot to able to count it when searching?", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_NoHumansRangeMultiplier	= CreateConVar("l4d2_improvedbots_itemscavenge_nohumans_rangemultiplier", "3.0", "The bots' scavenge distance is multiplied to this value when there's no human players left in the team.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_Ammo_Type_Override 						= CreateConVar("ib_ammotype_override", "", "If your server has weapons with modified ammo types/amounts, put them here in a following format: \"weapon_id:ammo_max weapon_id:ammo_max ...\"", FCVAR_NOTIFY);
 
-	g_hCvar_BotWeaponPreference_Nick 				= CreateConVar("l4d2_improvedbots_weapon_preference_nick", "1", "Bot Nick's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Rochelle 			= CreateConVar("l4d2_improvedbots_weapon_preference_rochelle", "1", "Bot Rochelle's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Coach 				= CreateConVar("l4d2_improvedbots_weapon_preference_coach", "2", "Bot Coach's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Ellis 				= CreateConVar("l4d2_improvedbots_weapon_preference_ellis", "3", "Bot Ellis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Bill  				= CreateConVar("l4d2_improvedbots_weapon_preference_bill", "1", "Bot Bill's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Zoey 				= CreateConVar("l4d2_improvedbots_weapon_preference_zoey", "3", "Bot Zoey's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Francis 			= CreateConVar("l4d2_improvedbots_weapon_preference_francis", "2", "Bot Francis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_Louis 				= CreateConVar("l4d2_improvedbots_weapon_preference_louis", "1", "Bot Louis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
-	g_hCvar_BotWeaponPreference_ForceMagnum 		= CreateConVar("l4d2_improvedbots_weapon_preference_magnums_only", "0", "If every survivor bot should only use magnum instead of regular pistol if possible.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_ImprovedMelee_Enabled 					= CreateConVar("ib_melee_enabled", "1", "Enables survivor bots' improved melee behaviour.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_ImprovedMelee_MaxCount 					= CreateConVar("ib_melee_max_team", "2", "The total number of melee weapons allowed on the team. <0: Bots never use melee>", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_SwitchCount 				= CreateConVar("ib_melee_switch_count", "4", "The nearby infected count required for bot to switch to their melee weapon.", FCVAR_NOTIFY, true, 1.0);
+	g_hCvar_ImprovedMelee_SwitchRange 				= CreateConVar("ib_melee_switch_range", "200", "Range at which bot's target should be to switch to melee weapon.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_ApproachRange				= CreateConVar("ib_melee_approach_range", "125", "Range at which bot's target should be to approach it. <0: Disable Approaching>", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_AimRange 					= CreateConVar("ib_melee_aim_range", "125", "Range at which bot's target should be to start taking aim at it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_AttackRange 				= CreateConVar("ib_melee_attack_range", "75", "Range at which bot's target should be to start attacking it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_ShoveChance 				= CreateConVar("ib_melee_shove_chance", "3", "Chance for bot to bash target instead of attacking with melee. <0: Disable Bashing>", FCVAR_NOTIFY, true, 0.0);
 
-	g_hCvar_SwapSameTypePrimaries 					= CreateConVar("l4d2_improvedbots_changeweaponiftoomanysubtype_primaries", "1", "Makes survivor bots change their primary weapon subtype if there's too much of the same one, Ex. change AK-47 to M16 or SPAS-12 to Autoshotgun.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_SwapSameTypeGrenades 					= CreateConVar("l4d2_improvedbots_changeweaponiftoomanysubtype_grenades", "1", "Makes survivor bots change their grenade type if there's too much of the same one, Ex. Pipe-Bomb to Molotov.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_ImprovedMelee_ChainsawLimit 			= CreateConVar("ib_melee_chainsaw_limit", "1", "The total number of chainsaws allowed on the team. <0: Bots never use chainsaw>", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ImprovedMelee_SwitchCount2 				= CreateConVar("ib_melee_chainsaw_switch_count", "8", "The nearby infected count required for bot to switch to chainsaw.", FCVAR_NOTIFY, true, 1.0);
 
-	g_hCvar_MaxWeaponTier3_M60 						= CreateConVar("l4d2_improvedbots_tier3weaponlimit_m60", "1", "The total number of M60s allowed on the team. <0: Bots never use M60>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_MaxWeaponTier3_GLauncher 				= CreateConVar("l4d2_improvedbots_tier3weaponlimit_grenadelauncher", "1", "The total number of grenade launchers allowed on the team. <0: Bots never use grenade launcher>", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_TargetSelection_Enabled					= CreateConVar("ib_targeting_enabled", "1", "Enables survivor bots' improved target selection.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_TargetSelection_ShootRange				= CreateConVar("ib_targeting_range", "1500", "Range at which target need to be for bots to start firing at it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_TargetSelection_ShootRange2				= CreateConVar("ib_targeting_range_shotgun", "800", "Range at which target need to be for bots to start firing at it with shotgun.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_TargetSelection_ShootRange3				= CreateConVar("ib_targeting_range_sniperrifle", "2500", "Range at which target need to be for bots to start firing at it with sniper rifle.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_TargetSelection_ShootRange4				= CreateConVar("ib_targeting_range_pistol", "1000", "Range at which target need to be for bots to start firing at it with secondary weapon.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_TargetSelection_IgnoreDociles			= CreateConVar("ib_targeting_ignoredociles", "1", "If bots shouldn't target common infected that are currently not attacking survivors.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_hCvar_GrenadeThrow_Enabled 					= CreateConVar("ib_gren_enabled", "1", "Enables survivor bots throwing grenades.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_GrenadeThrow_GrenadeTypes				= CreateConVar("ib_gren_types", "7", "What grenades should survivor bots throw? <1: Pipe-Bomb, 2: Molotov, 4: Bile Bomb. Add numbers together.>", FCVAR_NOTIFY, true, 1.0, true, 7.0);
+	g_hCvar_GrenadeThrow_ThrowRange					= CreateConVar("ib_gren_throw_range", "1500", "Range at which target needs to be for bot to throw grenade at it.", FCVAR_NOTIFY);
+	g_hCvar_GrenadeThrow_HordeSize 					= CreateConVar("ib_gren_horde_size_multiplier", "5.0", "Infected count required to throw grenade Multiplier (Value * SurvivorCount).", FCVAR_NOTIFY, true, 1.0);
+	g_hCvar_GrenadeThrow_NextThrowTime1 			= CreateConVar("ib_gren_next_throw_time_min", "15", "First number to pick to randomize next grenade throw time.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_GrenadeThrow_NextThrowTime2 			= CreateConVar("ib_gren_next_throw_time_max", "35", "Second number to pick to randomize next grenade throw time.", FCVAR_NOTIFY, true, 0.0);
+
+	g_hCvar_TankRock_ShootEnabled 					= CreateConVar("ib_shootattankrocks_enabled", "1", "Enables survivor bots shooting tank's thrown rocks.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_TankRock_ShootRange 					= CreateConVar("ib_shootattankrocks_range", "1000", "Range at which rock needs to be for bot to start shooting at it.", FCVAR_NOTIFY, true, 0.0);
+
+	g_hCvar_AutoShove_Enabled						= CreateConVar("ib_autoshove_enabled", "1", "Makes survivor bots automatically shove every nearby infected. <0: Disabled, 1: All infected, 2: Only if infected is behind them>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+
+	g_hCvar_HelpPinnedFriend_Enabled				= CreateConVar("ib_help_pinned_enabled", "3", "Makes survivor bots force attack pinned survivor's SI if possible. <0: Disabled, 1: Shoot at attacker, 2: Shove the attacker if close enough. Add numbers together.>", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hCvar_HelpPinnedFriend_ShootRange				= CreateConVar("ib_help_pinned_shootrange", "1000", "Range at which bots will start firing at SI.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_HelpPinnedFriend_ShoveRange				= CreateConVar("ib_help_pinned_shoverange", "75", "Range at which bots will start to bash SI.", FCVAR_NOTIFY, true, 0.0);
+
+	g_hCvar_DefibRevive_Enabled						= CreateConVar("ib_defib_revive_enabled", "1", "Enable bots reviving dead players with defibrillators if they have one available.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_DefibRevive_ScanDist 					= CreateConVar("ib_defib_revive_distance", "2000", "Range at which survivor's dead body should be for bot to consider it reviveable.", FCVAR_NOTIFY, true, 0.0);
+
+	g_hCvar_FireBash_Chance1						= CreateConVar("ib_shove_chance_pump", "0", "Chance at which survivor bot may shove after firing a pump-action shotgun. <0: Disabled, 1: Always>", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_FireBash_Chance2						= CreateConVar("ib_shove_chance_css", "0", "Chance at which survivor bot may shove after firing a bolt-action sniper rifle. <0: Disabled, 1: Always>", FCVAR_NOTIFY, true, 0.0);
 	
-	g_hCvar_Vision_FieldOfView 						= CreateConVar("l4d2_improvedbots_vision_fieldofview", "60.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
-	g_hCvar_Vision_NoticeTimeScale 					= CreateConVar("l4d2_improvedbots_vision_noticetimescale", "1.1", "The time required for bots to notice enemy target is multiplied to this value.", FCVAR_NOTIFY, true, 0.0, true, 4.0);
+	g_hCvar_ItemScavenge_Items 						= CreateConVar("ib_grab_enabled", "16383", "Enable improved bot item scavenging for specified items.\n<0: Disabled, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defib, 32: UpgradePack, 64: Pills, 128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons. Add numbers together>", FCVAR_NOTIFY, true, 0.0, true, 16383.0);
+	g_hCvar_ItemScavenge_Models						= CreateConVar("ib_grab_models", "0", "If enabled, objects with certain models will be considered as scavengeable items.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_ItemScavenge_ApproachRange 				= CreateConVar("ib_grab_distance", "300", "Distance at which a not visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_ApproachVisibleRange 		= CreateConVar("ib_grab_visible_distance", "600", "Distance at which a visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_PickupRange 				= CreateConVar("ib_grab_pickup_distance", "90", "Distance at which item should be for bot to able to pick it up.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_MapSearchRange 			= CreateConVar("ib_grab_mapsearchdistance", "2000", "How close should the item be to the survivor bot to able to count it when searching?", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_NoHumansRangeMultiplier	= CreateConVar("ib_grab_nohumans_rangemultiplier", "2.5", "The bots' scavenge distance is multiplied to this value when there's no human players left in the team.", FCVAR_NOTIFY, true, 0.0);
+
+	g_hCvar_BotWeaponPreference_Nick 				= CreateConVar("ib_pref_nick", "1", "Bot Nick's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Rochelle 			= CreateConVar("ib_pref_rochelle", "1", "Bot Rochelle's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Coach 				= CreateConVar("ib_pref_coach", "2", "Bot Coach's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Ellis 				= CreateConVar("ib_pref_ellis", "3", "Bot Ellis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Bill  				= CreateConVar("ib_pref_bill", "1", "Bot Bill's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Zoey 				= CreateConVar("ib_pref_zoey", "3", "Bot Zoey's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Francis 			= CreateConVar("ib_pref_francis", "2", "Bot Francis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_Louis 				= CreateConVar("ib_pref_louis", "1", "Bot Louis's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
+	g_hCvar_BotWeaponPreference_ForceMagnum 		= CreateConVar("ib_pref_magnums_only", "0", "If every survivor bot should only use magnum instead of regular pistol if possible.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_hCvar_HasEnoughAmmoRatio 						= CreateConVar("ib_hasenoughammo_ratio", "0.33", "If the survivor bot's primary ammo percentage is above this value, they'll consider that they have enough ammo before refill", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_hCvar_SwapSameTypePrimaries 					= CreateConVar("ib_mix_primaries", "0", "Makes survivor bots change their primary weapon subtype if there's too much of the same one, Ex. change AK-47 to M16 or SPAS-12 to Autoshotgun.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_SwapSameTypeGrenades 					= CreateConVar("ib_mix_grenades", "0", "Makes survivor bots change their grenade type if there's too much of the same one, Ex. Pipe-Bomb to Molotov.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+
+	g_hCvar_T3_Refill 								= CreateConVar("ib_t3_refill", "0", "Should bots pick up ammo when carrying a Tier 3 weapon? Keep disabled if your server does not allow that. <0: Disabled, 1: Grenade Launcher, 2: M60, 3: Both>", FCVAR_NOTIFY, true, 0.0, true, 3.0);
+	g_hCvar_MaxWeaponTier3_M60 						= CreateConVar("ib_t3_limit_m60", "1", "The total number of M60s allowed on the team. <0: Bots never use M60>", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_MaxWeaponTier3_GLauncher 				= CreateConVar("ib_t3_limit_gl", "0", "The total number of grenade launchers allowed on the team. <0: Bots never use grenade launcher>", FCVAR_NOTIFY, true, 0.0);
 	
-	g_hCvar_SpitterAcidEvasion						= CreateConVar("l4d2_improvedbots_evadespitteracids", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_AlwaysCarryProp							= CreateConVar("l4d2_improvedbots_alwayscarryprop", "1", "If enabled, survivor bot will keep holding the prop it currently has unless it's swarmed by a mob, every teammate needs help, or it wants to use an item.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_KeepMovingInCombat						= CreateConVar("l4d2_improvedbots_keepmovingincombat", "1", "If bots shouldn't stop moving in combat when there's no human players in team.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_SwitchOffCSSWeapons						= CreateConVar("l4d2_improvedbots_switchoffcssweapon", "1", "If bots should change their primary weapon to other one if they're using CSS weapons.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_ChargerEvasion							= CreateConVar("l4d2_improvedbots_chargerevasion", "1", "Enables survivor bots's charger dodging behavior.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_DeployUpgradePacks						= CreateConVar("l4d2_improvedbots_deployupgradepacks", "1", "If bots should deploy their upgrade pack when available and not in combat.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_DontSwitchToPistol						= CreateConVar("l4d2_improvedbots_dontswitchtopistol", "1", "If bots shouldn't switch to their pistol while they have sniper rifle equiped.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_TakeCoverFromRocks						= CreateConVar("l4d2_improvedbots_takecoverfromtankrocks", "1", "If bots should take cover from tank's thrown rocks.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_AvoidTanksWithProp						= CreateConVar("l4d2_improvedbots_avoidtanksnearpunchableprops", "1", "If bots should avoid and retreat from tanks that are nearby punchable props like cars.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_NoFallDmgOnLadderFail					= CreateConVar("l4d2_improvedbots_nofalldmgonladderfail", "1", "If enabled, survivor bots won't take fall damage if they were climbing a ladder just before that.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_Vision_FieldOfView 						= CreateConVar("ib_vision_fov", "75.0", "The field of view of survivor bots.", FCVAR_NOTIFY, true, 0.0, true, 180.0);
+	g_hCvar_Vision_NoticeTimeScale 					= CreateConVar("ib_vision_noticetimescale", "1.1", "The time required for bots to notice enemy target is multiplied to this value.", FCVAR_NOTIFY, true, 0.0, true, 4.0);
+	
+	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("ib_witchbehavior_allowcrowning", "0", "(WIP) Allows survivor bots to crown witch on their path if they're holding any shotgun type weapon. <0: Disabled; 1: Only if survivor team doesn't have any human players; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("ib_witchbehavior_walkwhennearby", "0", "Survivor bots will start walking near witch if they're this range near her and she's not disturbed. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
 
-	g_hCvar_WitchBehavior_WalkWhenNearby			= CreateConVar("l4d2_improvedbots_witchbehavior_walkwhennearby", "500", "Survivor bots will start walking near witch if they're this range near her and she's not disturbed. <0: Disabled>", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_WitchBehavior_AllowCrowning				= CreateConVar("l4d2_improvedbots_witchbehavior_allowcrowning", "1", "Allows survivor bots to crown witch on their path if they're holding any shotgun type weapon. <0: Disabled; 1: Only if survivor team doesn't have any human players; 2:Enabled>", FCVAR_NOTIFY, true, 0.0, true, 2.0);
+	g_hCvar_NoFallDmgOnLadderFail					= CreateConVar("ib_nofalldmgonladderfail", "1", "If enabled, survivor bots won't take fall damage if they were climbing a ladder just before that.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_DeployUpgradePacks						= CreateConVar("ib_deployupgradepacks", "1", "(WIP) If bots should deploy their upgrade pack when available and not in combat.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_AcidEvasion								= CreateConVar("ib_evade_spit", "1", "Enables survivor bots' improved spitter acid evasion", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_ChargerEvasion							= CreateConVar("ib_evade_charge", "1", "Enables survivor bots's charger dodging behavior.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_TakeCoverFromRocks						= CreateConVar("ib_takecoverfromtankrocks", "1", "If bots should take cover from tank's thrown rocks.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_AvoidTanksWithProp						= CreateConVar("ib_avoidtanksnearpunchableprops", "0", "(WIP) If bots should avoid and retreat from tanks that are nearby punchable props (like cars).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	
+	// g_hCvar_KeepMovingInCombat						= CreateConVar("ib_keepmovingincombat", "1", "If bots shouldn't stop moving in combat when there's no human players in team.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	// g_hCvar_AlwaysCarryProp							= CreateConVar("ib_alwayscarryprop", "0", "If enabled, survivor bot will keep holding the prop it currently has unless it's swarmed by a mob, every teammate needs help, or it wants to use an item.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_SwitchOffCSSWeapons						= CreateConVar("ib_avoid_css", "0", "If bots should change their primary weapon to other one if they're using CSS weapons.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
+	g_hCvar_DontSwitchToPistol						= CreateConVar("ib_dontswitchtopistol", "1", "If bots shouldn't switch to their pistol while they have sniper rifle equipped.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
-	g_hCvar_NextProcessTime 						= CreateConVar("l4d2_improvedbots_process_time", "0.1", "Bots' data computing time delay (infected count, nearby friends, etc). Increasing the value might help increasing the game performance, but slow down bots.", FCVAR_NOTIFY, true, 0.033);
+	g_hCvar_NextProcessTime 						= CreateConVar("ib_process_time", "0.1", "Bots' data computing time delay (infected count, nearby friends, etc). Increasing the value might help increasing the game performance, but slow down bots.", FCVAR_NOTIFY, true, 0.033);
+	g_hCvar_Debug 									= CreateConVar("ib_debug", "0", "Spam console/chat in hopes of finding a a clue for your problems. Prints WILL LAG on Windows GUI!", FCVAR_NOTIFY, true, 0.0, true, 1024.0);
+
+	g_hCvar_Nightmare 								= CreateConVar("ib_nightmare", "0", "Enable if you're playing on NIGHTMARE modpack! Adjusts the bot's behaviors to fit better to it", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
 	g_hCvar_GameDifficulty.AddChangeHook(OnConVarChanged);
 	g_hCvar_SurvivorLimpHealth.AddChangeHook(OnConVarChanged);
 	g_hCvar_TankRockHealth.AddChangeHook(OnConVarChanged);
-	g_hCvar_GasCanUseDuration.AddChangeHook(OnConVarChanged);
 	g_hCvar_ChaseBileRange.AddChangeHook(OnConVarChanged);
 	g_hCvar_ServerGravity.AddChangeHook(OnConVarChanged);
 	g_hCvar_BileCoverDuration_Bot.AddChangeHook(OnConVarChanged);
 	g_hCvar_BileCoverDuration_PZ.AddChangeHook(OnConVarChanged);
+	g_hCvar_ShovePenaltyMin_Coop.AddChangeHook(OnConVarChanged);
+	g_hCvar_ShovePenaltyMin_Versus.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_MaxAmmo_Pistol.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxAmmo_AssaultRifle.AddChangeHook(OnConVarChanged);
@@ -696,6 +888,8 @@ void CreateAndHookConVars()
 	g_hCvar_MaxAmmo_Chainsaw.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxAmmo_AmmoPack.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxAmmo_Medkit.AddChangeHook(OnConVarChanged);
+	
+	g_hCvar_Ammo_Type_Override.AddChangeHook(OnConVarChanged);
 
 	g_hCvar_MaxMeleeSurvivors.AddChangeHook(OnConVarChanged);
 	g_hCvar_BotsShootThrough.AddChangeHook(OnConVarChanged);
@@ -746,6 +940,7 @@ void CreateAndHookConVars()
 	g_hCvar_FireBash_Chance1.AddChangeHook(OnConVarChanged);
 	g_hCvar_FireBash_Chance2.AddChangeHook(OnConVarChanged);
 	
+	g_hCvar_ItemScavenge_Models.AddChangeHook(OnConVarChanged);
 	g_hCvar_ItemScavenge_Items.AddChangeHook(OnConVarChanged);
 	g_hCvar_ItemScavenge_ApproachRange.AddChangeHook(OnConVarChanged);
 	g_hCvar_ItemScavenge_ApproachVisibleRange.AddChangeHook(OnConVarChanged);
@@ -767,15 +962,16 @@ void CreateAndHookConVars()
 	g_hCvar_SwapSameTypePrimaries.AddChangeHook(OnConVarChanged);
 	g_hCvar_SwapSameTypeGrenades.AddChangeHook(OnConVarChanged);
 
+	g_hCvar_T3_Refill.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxWeaponTier3_M60.AddChangeHook(OnConVarChanged);
 	g_hCvar_MaxWeaponTier3_GLauncher.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_Vision_FieldOfView.AddChangeHook(OnConVarChanged);
 	g_hCvar_Vision_NoticeTimeScale.AddChangeHook(OnConVarChanged);
 	
-	g_hCvar_SpitterAcidEvasion.AddChangeHook(OnConVarChanged);
-	g_hCvar_AlwaysCarryProp.AddChangeHook(OnConVarChanged);
-	g_hCvar_KeepMovingInCombat.AddChangeHook(OnConVarChanged);
+	g_hCvar_AcidEvasion.AddChangeHook(OnConVarChanged);
+	// g_hCvar_AlwaysCarryProp.AddChangeHook(OnConVarChanged);
+	// g_hCvar_KeepMovingInCombat.AddChangeHook(OnConVarChanged);
 	g_hCvar_SwitchOffCSSWeapons.AddChangeHook(OnConVarChanged);
 	g_hCvar_ChargerEvasion.AddChangeHook(OnConVarChanged);
 	g_hCvar_DeployUpgradePacks.AddChangeHook(OnConVarChanged);
@@ -783,11 +979,15 @@ void CreateAndHookConVars()
 	g_hCvar_TakeCoverFromRocks.AddChangeHook(OnConVarChanged);
 	g_hCvar_AvoidTanksWithProp.AddChangeHook(OnConVarChanged);
 	g_hCvar_NoFallDmgOnLadderFail.AddChangeHook(OnConVarChanged);
+	g_hCvar_HasEnoughAmmoRatio.AddChangeHook(OnConVarChanged);
 
 	g_hCvar_WitchBehavior_WalkWhenNearby.AddChangeHook(OnConVarChanged);
 	g_hCvar_WitchBehavior_AllowCrowning.AddChangeHook(OnConVarChanged);
 	
 	g_hCvar_NextProcessTime.AddChangeHook(OnConVarChanged);
+	g_hCvar_Debug.AddChangeHook(OnConVarChanged);
+
+	g_hCvar_Nightmare.AddChangeHook(OnConVarChanged);
 }
 
 public void OnAllPluginsLoaded()
@@ -810,11 +1010,11 @@ void UpdateConVarValues()
 	g_hCvar_GameDifficulty.GetString(g_sCvar_GameDifficulty, sizeof(g_sCvar_GameDifficulty));
 	g_iCvar_SurvivorLimpHealth 							= g_hCvar_SurvivorLimpHealth.IntValue;
 	g_iCvar_TankRockHealth 								= g_hCvar_TankRockHealth.IntValue;
-	g_fCvar_GasCanUseDuration 							= g_hCvar_GasCanUseDuration.FloatValue;
 	g_fCvar_ChaseBileRange 								= g_hCvar_ChaseBileRange.FloatValue;
 	g_fCvar_ServerGravity 								= g_hCvar_ServerGravity.FloatValue;
 	g_fCvar_BileCoverDuration_Bot 						= g_hCvar_BileCoverDuration_Bot.FloatValue;
 	g_fCvar_BileCoverDuration_PZ 						= g_hCvar_BileCoverDuration_PZ.FloatValue;
+	g_iCvar_ShovePenaltyMin								= (L4D_IsVersusMode() ? g_hCvar_ShovePenaltyMin_Versus : g_hCvar_ShovePenaltyMin_Coop).IntValue;
 
 	g_iCvar_MaxAmmo_Pistol								= g_hCvar_MaxAmmo_Pistol.IntValue;
 	g_iCvar_MaxAmmo_AssaultRifle						= g_hCvar_MaxAmmo_AssaultRifle.IntValue;
@@ -833,6 +1033,16 @@ void UpdateConVarValues()
 	g_iCvar_MaxAmmo_Chainsaw							= g_hCvar_MaxAmmo_Chainsaw.IntValue;
 	g_iCvar_MaxAmmo_AmmoPack							= g_hCvar_MaxAmmo_AmmoPack.IntValue;
 	g_iCvar_MaxAmmo_Medkit								= g_hCvar_MaxAmmo_Medkit.IntValue;
+	
+	char sArgs[32];
+	g_hCvar_Ammo_Type_Override.GetString( sArgs, sizeof(sArgs));
+	if (strcmp(sArgs, g_sCvar_Ammo_Type_Override))
+	{
+		//if (g_bCvar_Debug)
+		PrintToServer("UpdateConVarValues: InitMaxAmmo");
+		strcopy(g_sCvar_Ammo_Type_Override, sizeof(g_sCvar_Ammo_Type_Override), sArgs);
+		InitMaxAmmo();
+	}
 
 	g_bCvar_BotsShootThrough 							= g_hCvar_BotsShootThrough.BoolValue;
 	g_bCvar_BotsFriendlyFire 							= g_hCvar_BotsFriendlyFire.BoolValue;
@@ -846,10 +1056,11 @@ void UpdateConVarValues()
 	g_bCvar_ImprovedMelee_Enabled 						= g_hCvar_ImprovedMelee_Enabled.BoolValue;
 	g_iCvar_ImprovedMelee_SwitchCount 					= g_hCvar_ImprovedMelee_SwitchCount.IntValue;
 	g_iCvar_ImprovedMelee_ShoveChance 					= g_hCvar_ImprovedMelee_ShoveChance.IntValue;
-	g_fCvar_ImprovedMelee_SwitchRange 					= (g_hCvar_ImprovedMelee_SwitchRange.FloatValue*g_hCvar_ImprovedMelee_SwitchRange.FloatValue);
-	g_fCvar_ImprovedMelee_ApproachRange 				= (g_hCvar_ImprovedMelee_ApproachRange.FloatValue*g_hCvar_ImprovedMelee_ApproachRange.FloatValue);
-	g_fCvar_ImprovedMelee_AimRange 						= (g_hCvar_ImprovedMelee_AimRange.FloatValue*g_hCvar_ImprovedMelee_AimRange.FloatValue);
+	g_fCvar_ImprovedMelee_SwitchRange 					= (g_hCvar_ImprovedMelee_SwitchRange.FloatValue * g_hCvar_ImprovedMelee_SwitchRange.FloatValue);
+	g_fCvar_ImprovedMelee_ApproachRange 				= (g_hCvar_ImprovedMelee_ApproachRange.FloatValue * g_hCvar_ImprovedMelee_ApproachRange.FloatValue);
+	g_fCvar_ImprovedMelee_AimRange_Sqr					= (g_hCvar_ImprovedMelee_AimRange.FloatValue * g_hCvar_ImprovedMelee_AimRange.FloatValue);
 	g_fCvar_ImprovedMelee_AttackRange 					= g_hCvar_ImprovedMelee_AttackRange.FloatValue;
+	g_fCvar_ImprovedMelee_AttackRange_Sqr 				= (g_hCvar_ImprovedMelee_AttackRange.FloatValue * g_hCvar_ImprovedMelee_AttackRange.FloatValue);
 	
 	g_iCvar_ImprovedMelee_ChainsawLimit 				= g_hCvar_ImprovedMelee_ChainsawLimit.IntValue;
 	g_iCvar_ImprovedMelee_SwitchCount2 					= g_hCvar_ImprovedMelee_SwitchCount2.IntValue;
@@ -875,15 +1086,17 @@ void UpdateConVarValues()
 	g_bCvar_GrenadeThrow_Enabled 						= g_hCvar_GrenadeThrow_Enabled.BoolValue;
 	g_iCvar_GrenadeThrow_GrenadeTypes 					= g_hCvar_GrenadeThrow_GrenadeTypes.IntValue;
 	g_fCvar_GrenadeThrow_ThrowRange 					= g_hCvar_GrenadeThrow_ThrowRange.FloatValue;
+	g_fCvar_GrenadeThrow_ThrowRange_Sqr 				= (g_fCvar_GrenadeThrow_ThrowRange * g_fCvar_GrenadeThrow_ThrowRange);
+	g_fCvar_GrenadeThrow_ThrowRange_NoVisCheck			= ((g_fCvar_GrenadeThrow_ThrowRange * 0.33) * (g_fCvar_GrenadeThrow_ThrowRange * 0.33));
 	g_fCvar_GrenadeThrow_HordeSize 						= g_hCvar_GrenadeThrow_HordeSize.FloatValue;
 	g_fCvar_GrenadeThrow_NextThrowTime1 				= g_hCvar_GrenadeThrow_NextThrowTime1.FloatValue;
 	g_fCvar_GrenadeThrow_NextThrowTime2 				= g_hCvar_GrenadeThrow_NextThrowTime2.FloatValue;
 
 	g_bCvar_TankRock_ShootEnabled						= g_hCvar_TankRock_ShootEnabled.BoolValue;
-	g_fCvar_TankRock_ShootRange							= (g_hCvar_TankRock_ShootRange.FloatValue*g_hCvar_TankRock_ShootRange.FloatValue);
+	g_fCvar_TankRock_ShootRange_Sqr						= (g_hCvar_TankRock_ShootRange.FloatValue * g_hCvar_TankRock_ShootRange.FloatValue);
 
 	g_bCvar_DefibRevive_Enabled 						= g_hCvar_DefibRevive_Enabled.BoolValue;
-	g_fCvar_DefibRevive_ScanDist 						= g_hCvar_DefibRevive_ScanDist.FloatValue;
+	g_fCvar_DefibRevive_ScanDist_Sqr 					= (g_hCvar_DefibRevive_ScanDist.FloatValue * g_hCvar_DefibRevive_ScanDist.FloatValue);
 
 	g_iCvar_FireBash_Chance1 							= g_hCvar_FireBash_Chance1.IntValue;
 	g_iCvar_FireBash_Chance2 							= g_hCvar_FireBash_Chance2.IntValue;
@@ -891,27 +1104,30 @@ void UpdateConVarValues()
 	g_iCvar_AutoShove_Enabled 							= g_hCvar_AutoShove_Enabled.BoolValue;
 	
 	g_iCvar_HelpPinnedFriend_Enabled 					= g_hCvar_HelpPinnedFriend_Enabled.IntValue;
-	g_fCvar_HelpPinnedFriend_ShootRange 				= g_hCvar_HelpPinnedFriend_ShootRange.FloatValue;
-	g_fCvar_HelpPinnedFriend_ShoveRange 				= g_hCvar_HelpPinnedFriend_ShoveRange.FloatValue;
+	//g_fCvar_HelpPinnedFriend_ShootRange 				= g_hCvar_HelpPinnedFriend_ShootRange.FloatValue;
+	g_fCvar_HelpPinnedFriend_ShootRange_Sqr				= (g_hCvar_HelpPinnedFriend_ShootRange.FloatValue * g_hCvar_HelpPinnedFriend_ShootRange.FloatValue);
 	
+	g_iCvar_ItemScavenge_Models 						= g_hCvar_ItemScavenge_Models.IntValue;
 	g_iCvar_ItemScavenge_Items 							= g_hCvar_ItemScavenge_Items.IntValue;
 	g_fCvar_ItemScavenge_ApproachRange 					= g_hCvar_ItemScavenge_ApproachRange.FloatValue;
 	g_fCvar_ItemScavenge_ApproachVisibleRange 			= g_hCvar_ItemScavenge_ApproachVisibleRange.FloatValue;
-	g_fCvar_ItemScavenge_PickupRange 					= g_hCvar_ItemScavenge_PickupRange.FloatValue;
-	g_fCvar_ItemScavenge_MapSearchRange 				= (g_hCvar_ItemScavenge_MapSearchRange.FloatValue*g_hCvar_ItemScavenge_MapSearchRange.FloatValue);
+	g_fCvar_ItemScavenge_PickupRange					= g_hCvar_ItemScavenge_PickupRange.FloatValue;
+	g_fCvar_ItemScavenge_PickupRange_Sqr				= (g_fCvar_ItemScavenge_PickupRange * g_fCvar_ItemScavenge_PickupRange);
+	g_fCvar_ItemScavenge_MapSearchRange_Sqr				= (g_hCvar_ItemScavenge_MapSearchRange.FloatValue * g_hCvar_ItemScavenge_MapSearchRange.FloatValue);
 	g_fCvar_ItemScavenge_NoHumansRangeMultiplier 		= g_hCvar_ItemScavenge_NoHumansRangeMultiplier.FloatValue;
 
 	g_bCvar_SwapSameTypePrimaries 						= g_hCvar_SwapSameTypePrimaries.BoolValue;
 	g_bCvar_SwapSameTypeGrenades 						= g_hCvar_SwapSameTypeGrenades.BoolValue;
 	
+	g_iCvar_T3_Refill									= g_hCvar_T3_Refill.IntValue;
 	g_iCvar_MaxWeaponTier3_M60 							= g_hCvar_MaxWeaponTier3_M60.IntValue;
 	g_iCvar_MaxWeaponTier3_GLauncher 					= g_hCvar_MaxWeaponTier3_GLauncher.IntValue;
 	
 	g_fCvar_Vision_FieldOfView 							= g_hCvar_Vision_FieldOfView.FloatValue;
 	g_fCvar_Vision_NoticeTimeScale 						= g_hCvar_Vision_NoticeTimeScale.FloatValue;
 	
-	g_bCvar_SpitterAcidEvasion							= g_hCvar_SpitterAcidEvasion.BoolValue;
-	g_bCvar_AlwaysCarryProp								= g_hCvar_AlwaysCarryProp.BoolValue;
+	g_bCvar_AcidEvasion									= g_hCvar_AcidEvasion.BoolValue;
+	// g_bCvar_AlwaysCarryProp								= g_hCvar_AlwaysCarryProp.BoolValue;
 	g_bCvar_SwitchOffCSSWeapons							= g_hCvar_SwitchOffCSSWeapons.BoolValue;
 	g_bCvar_ChargerEvasion								= g_hCvar_ChargerEvasion.BoolValue;
 	g_bCvar_DeployUpgradePacks							= g_hCvar_DeployUpgradePacks.BoolValue;
@@ -919,17 +1135,28 @@ void UpdateConVarValues()
 	g_bCvar_TakeCoverFromRocks							= g_hCvar_TakeCoverFromRocks.BoolValue;
 	g_bCvar_AvoidTanksWithProp							= g_hCvar_AvoidTanksWithProp.BoolValue;
 	g_bCvar_NoFallDmgOnLadderFail						= g_hCvar_NoFallDmgOnLadderFail.BoolValue;
+	g_fCvar_HasEnoughAmmoRatio							= g_hCvar_HasEnoughAmmoRatio.FloatValue;
 
-	if (g_bMapStarted)
-	{
-		char sShouldHurryCode[64]; FormatEx(sShouldHurryCode, sizeof(sShouldHurryCode), "DirectorScript.GetDirectorOptions().cm_ShouldHurry <- %i", g_hCvar_KeepMovingInCombat.IntValue);
-		L4D2_ExecVScriptCode(sShouldHurryCode);
-	}
+	// if (g_bMapStarted)
+	// {
+	// 	char sShouldHurryCode[64]; FormatEx(sShouldHurryCode, sizeof(sShouldHurryCode), "DirectorScript.GetDirectorOptions().cm_ShouldHurry <- %i", g_hCvar_KeepMovingInCombat.IntValue);
+	// 	L4D2_ExecVScriptCode(sShouldHurryCode);
+	// }
 
 	g_fCvar_WitchBehavior_WalkWhenNearby 				= g_hCvar_WitchBehavior_WalkWhenNearby.FloatValue;
 	g_iCvar_WitchBehavior_AllowCrowning 				= g_hCvar_WitchBehavior_AllowCrowning.IntValue;
 
 	g_fCvar_NextProcessTime 							= g_hCvar_NextProcessTime.FloatValue;
+	g_iCvar_Debug 										= g_hCvar_Debug.IntValue;
+	//if(L4D_HasMapStarted())
+	//{
+	//	if (g_iCvar_Debug & DEBUG_HUD)
+	//		DebugHUDShow();
+	//	else
+	//		DebugHUDHide();
+	//}
+
+	g_bCvar_Nightmare 									= g_hCvar_Nightmare.BoolValue;
 }
 
 static Handle g_hCalcAbsolutePosition;
@@ -1047,16 +1274,6 @@ void CreateAllSDKCalls(Handle hGameData)
 	if ((g_hSurvivorLegsRetreat = EndPrepSDKCall()) == null)
 		SetFailState("Failed to create SDKCall for SurvivorLegsRetreat::SurvivorLegsRetreat signature!");
 
-	/*
-	StartPrepSDKCall(SDKCall_Raw);
-	PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "Subdivider::SubdivideX");
-	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
-	PrepSDKCall_AddParameter(SDKType_Bool, SDKPass_Plain);
-	PrepSDKCall_AddParameter(SDKType_Bool, SDKPass_Plain);
-	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
-	if ((g_hSubdivideNavArea = EndPrepSDKCall()) == null)
-		SetFailState("Failed to create SDKCall for Subdivider::SubdivideX signature!");
-	*/
 }
 
 static Handle g_hOnFindUseEntity;
@@ -1094,12 +1311,89 @@ void CreateAllDetours(Handle hGameData)
 		SetFailState("Failed to detour SurvivorBot::GetAvoidRange.");	
 }
 
-void Event_OnRoundStart(Event hEvent, const char[] sName, bool bBroadcast)
+bool ParseDataFile()
 {
-	ResetDataOnRoundChange();
+	char sPath[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, sPath, sizeof(sPath), "data/ib_data.cfg");
+	if( FileExists(sPath) == false )
+		SetFailState("\n==========\n[IB] Missing required file: \"%s\".\n==========", sPath);
+	
+	g_hWeaponToIDMap = CreateTrie();
+	g_hWeaponMdlMap = CreateTrie();
+	g_hMeleeMdlToID = CreateTrie();
+	g_hMeleePref = CreateTrie();
+	g_iDataFileSection = 0;
+
+	SMCParser parser = new SMCParser();
+	parser.OnEnterSection = DataFile_NewSection;
+	parser.OnKeyValue = DataFile_KeyValue;
+	parser.OnLeaveSection = DataFile_EndSection;
+	parser.OnEnd = DataFile_End;
+
+	char error[128];
+	int line = 0, col = 0;
+	SMCError result = parser.ParseFile(sPath, line, col);
+
+	if( result != SMCError_Okay )
+	{
+		parser.GetErrorString(result, error, sizeof(error));
+		SetFailState("%s on line %d, col %d of %s [%d]", error, line, col, sPath, result);
+	}
+
+	delete parser;
+	return (result == SMCError_Okay);
 }
 
-void Event_OnRoundEnd(Event hEvent, const char[] sName, bool bBroadcast)
+SMCResult DataFile_NewSection(SMCParser parser, const char[] section, bool quotes)
+{
+	g_iDataFileValueID = 0;
+	return SMCParse_Continue;
+}
+
+SMCResult DataFile_KeyValue(SMCParser parser, const char[] key, const char[] value, bool key_quotes, bool value_quotes)
+{
+	static int iValue;
+	
+	switch(g_iDataFileSection)
+	{
+		case 0:
+		{
+			iValue = StringToInt(value);
+			//PrintToServer("ParseDataFile %s %d", key, iValue);
+			g_hMeleePref.SetValue(key, iValue);
+		}
+		case 1:
+		{
+			strcopy( IBWeaponName[g_iDataFileValueID], 32, key );
+			g_hWeaponToIDMap.SetValue(key, view_as<L4D2WeaponId>(g_iDataFileValueID));
+			g_iDataFileValueID++;
+		}
+		case 2:
+		{
+			g_hWeaponMdlMap.SetString(key, value);
+		}
+		case 3:
+		{
+			g_hMeleeMdlToID.SetString(key, value);
+		}
+	}
+	
+	return SMCParse_Continue;
+}
+
+SMCResult DataFile_EndSection(SMCParser parser)
+{
+	g_iDataFileSection++;
+	return SMCParse_Continue;
+}
+
+void DataFile_End(SMCParser parser, bool halted, bool failed)
+{
+	if( failed )
+		SetFailState("Error: could not load data file.");
+}
+
+void Event_OnRoundStart(Event hEvent, const char[] sName, bool bBroadcast)
 {
 	ResetDataOnRoundChange();
 }
@@ -1108,14 +1402,16 @@ static float g_fClient_ThinkFunctionDelay[MAXPLAYERS+1];
 void ResetDataOnRoundChange()
 {
 	g_iBotProcessing_ProcessedCount = 0;
-	g_fBotProcessing_NextProcessTime = GetGameTime() + g_fCvar_NextProcessTime;
-	g_fSurvivorBot_Grenade_NextThrowTime = g_fSurvivorBot_Grenade_NextThrowTime_Molotov = GetGameTime() + 5.0;
+	g_fBotProcessing_NextProcessTime = (GetGameTime() + g_fCvar_NextProcessTime);
+
+	g_fBot_Grenade_NextThrowTime = g_fBot_Grenade_NextThrowTime_Molotov = (GetGameTime() + 5.0);
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (GetGameTime() > g_fClient_ThinkFunctionDelay[i])g_fClient_ThinkFunctionDelay[i] = GetGameTime() + 5.0;
-		if (!IsClientInGame(i))continue;
-		ResetClientPluginVariables(i);
+		g_fClient_ThinkFunctionDelay[i] = (GetGameTime() + 5.0);
+
+		if (IsClientInGame(i))
+			ResetClientPluginVariables(i);
 	}
 }
 
@@ -1141,101 +1437,116 @@ public void OnClientDisconnect(int iClient)
 }
 
 void ResetClientPluginVariables(int iClient)
-{	
-	g_bBotProcessing_IsProcessed[iClient] = false;
-
-	g_iSurvivorBot_TargetInfected[iClient] = -1;	
-	g_iSurvivorBot_WitchTarget[iClient] = -1;	
-	g_iSurvivorBot_ThreatInfectedCount[iClient] = 0;
-	g_iSurvivorBot_NearbyInfectedCount[iClient] = 0;
-	g_iSurvivorBot_NearestInfectedCount[iClient] = 0;
-	g_iSurvivorBot_GrenadeInfectedCount[iClient] = 0;
-	g_iSurvivorBot_ScavengeItem[iClient] = -1;
-	g_iSurvivorBot_DefibTarget[iClient] = -1;
-	g_iSurvivorBot_Grenade_ThrowTarget[iClient] = -1;
-	g_iSurvivorBot_MovePos_Priority[iClient] = 0;
+{
+	g_iBot_TargetInfected[iClient] = 0;	
+	g_iBot_WitchTarget[iClient] = 0;	
+	g_iBot_ThreatInfectedCount[iClient] = 0;
+	g_iBot_NearbyInfectedCount[iClient] = 0;
+	g_iBot_NearestInfectedCount[iClient] = 0;
+	g_iBot_GrenadeInfectedCount[iClient] = 0;
+	g_iBot_ScavengeItem[iClient] = 0;
+	g_fBot_ScavengeItemDist[iClient] = -1.0;
+	g_iBot_DefibTarget[iClient] = 0;
+	g_iBot_Grenade_ThrowTarget[iClient] = 0;
+	g_iBot_MovePos_Priority[iClient] = 0;
 	
-	g_sSurvivorBot_MovePos_Name[iClient][0] = 0;
-	g_fSurvivorBot_MovePos_Tolerance[iClient] = -1.0;
+	g_sBot_MovePos_Name[iClient][0] = 0;
+	g_fBot_MovePos_Tolerance[iClient] = -1.0;
 
-	g_bSurvivorBot_IsWitchHarasser[iClient] = false;
-	g_bSurvivorBot_ForceWeaponReload[iClient] = false;
-	g_bSurvivorBot_ForceSwitchWeapon[iClient] = false;
-	g_bSurvivorBot_ForceBash[iClient] = false;
-	g_bSurvivorBot_PreventFire[iClient] = false;
-	g_bSurvivorBot_MovePos_IgnoreDamaging[iClient] = false;
+	g_bBot_IsWitchHarasser[iClient] = false;
+	g_bBot_ForceWeaponReload[iClient] = false;
+	g_bBot_ForceSwitchWeapon[iClient] = false;
+	g_bBot_ForceBash[iClient] = false;
+	g_bBot_PreventFire[iClient] = false;
+	g_bBot_MovePos_IgnoreDamaging[iClient] = false;
 
-	g_fSurvivorBot_PinnedReactTime[iClient] = GetGameTime();
-	g_fSurvivorBot_NextUsePressTime[iClient] = GetGameTime() + 0.33;
-	g_fSurvivorBot_NextScavengeItemScanTime[iClient] = GetGameTime() + 1.0;
-	g_fSurvivorBot_BlockWeaponReloadTime[iClient] = GetGameTime();
-	g_fSurvivorBot_BlockWeaponSwitchTime[iClient] = GetGameTime();
-	g_fSurvivorBot_VomitBlindedTime[iClient] = GetGameTime();
-	g_fSurvivorBot_TimeSinceLeftLadder[iClient] = GetGameTime();
-	g_fSurvivorBot_MeleeApproachTime[iClient] = GetGameTime();
-	g_fSurvivorBot_MeleeAttackTime[iClient] = GetGameTime();
-	g_fSurvivorBot_NextMoveCommandTime[iClient] = GetGameTime() + BOT_CMD_MOVE_INTERVAL;
-	g_fSurvivorBot_LookPosition_Duration[iClient] = GetGameTime();
-	g_fSurvivorBot_NextPressAttackTime[iClient] = GetGameTime();
-	g_fSurvivorBot_MovePos_Duration[iClient] = GetGameTime();
-	g_fSurvivorBot_NextWeaponRangeSwitchTime[iClient] = GetGameTime();
+	g_fBot_PinnedReactTime[iClient] = GetGameTime();
+	g_fBot_NextScavengeItemScanTime[iClient] = GetGameTime() + 1.0;
+	g_fBot_BlockWeaponReloadTime[iClient] = GetGameTime();
+	g_fBot_BlockWeaponSwitchTime[iClient] = GetGameTime();
+	g_fBot_BlockWeaponAttackTime[iClient] = GetGameTime();
+	g_fBot_VomitBlindedTime[iClient] = GetGameTime();
+	g_fBot_TimeSinceLeftLadder[iClient] = GetGameTime();
+	g_fBot_MeleeApproachTime[iClient] = GetGameTime();
+	g_fBot_MeleeAttackTime[iClient] = GetGameTime();
+	g_fBot_NextMoveCommandTime[iClient] = GetGameTime() + BOT_CMD_MOVE_INTERVAL;
+	g_fBot_LookPosition_Duration[iClient] = GetGameTime();
+	g_fBot_NextPressAttackTime[iClient] = GetGameTime();
+	g_fBot_MovePos_Duration[iClient] = GetGameTime();
+	g_fBot_NextWeaponRangeSwitchTime[iClient] = GetGameTime();
 
-	SetVectorToZero(g_fSurvivorBot_Grenade_ThrowPos[iClient]);
-	SetVectorToZero(g_fSurvivorBot_Grenade_AimPos[iClient]);
-	SetVectorToZero(g_fSurvivorBot_LookPosition[iClient]);
-	SetVectorToZero(g_fSurvivorBot_MovePos_Position[iClient]);
+	SetVectorToZero(g_fBot_Grenade_ThrowPos[iClient]);
+	SetVectorToZero(g_fBot_Grenade_AimPos[iClient]);
+	SetVectorToZero(g_fBot_LookPosition[iClient]);
+	SetVectorToZero(g_fBot_MovePos_Position[iClient]);
 
 	for (int i = 0; i < MAXENTITIES; i++)
 	{
-		g_iSurvivorBot_VisionMemory_State[iClient][i] = g_iSurvivorBot_VisionMemory_State_FOV[iClient][i] = 0;
-		g_fSurvivorBot_VisionMemory_Time[iClient][i] = g_fSurvivorBot_VisionMemory_Time_FOV[iClient][i] = GetGameTime();
+		g_iBot_VisionMemory_State[iClient][i] = g_iBot_VisionMemory_State_FOV[iClient][i] = 0;
+		g_fBot_VisionMemory_Time[iClient][i] = g_fBot_VisionMemory_Time_FOV[iClient][i] = GetGameTime();
 	}
 
 	if (!IsValidClient(iClient) || !IsFakeClient(iClient) || GetClientTeam(iClient) != 2)
 		return;
 
 	L4D2_CommandABot(iClient, 0, BOT_CMD_RESET);
+	g_bBotProcessing_IsProcessed[iClient] = false;
 }
-
-/*void LBI_CommandABot(int iBot, int iCmd, const float fPos[3], int iTarget = -1)
-{
-	if (!IsValidClient(iBot) || !IsFakeClient(iBot) || !IsPlayerAlive(iBot))
-		return;
-
-	char sBuffer[256]; 
-	FormatEx(sBuffer, sizeof(sBuffer), "CommandABot({cmd = %i, bot = GetPlayerFromUserID(%i)", iCmd, GetClientUserId(iBot));
-
-	if (!IsNullVector(fPos))
-	{
-		FormatEx(sBuffer, sizeof(sBuffer), "%s, pos = Vector(%f, %f, %f)", sBuffer, fPos[0], fPos[1], fPos[2]);
-	}
-
-	if (iTarget != -1)
-	{
-		bool bIsPlayer = (IsValidClient(iTarget));
-		FormatEx(sBuffer, sizeof(sBuffer), "%s, target = %s(%i)", sBuffer, (bIsPlayer ? "GetPlayerFromUserID" : "EntIndexToHScript"), (!bIsPlayer ? iTarget : GetClientUserId(iTarget)));
-	}
-
-	StrCat(sBuffer, sizeof(sBuffer), "})");
-	L4D2_ExecVScriptCode(sBuffer);
-}*/
 
 void Event_OnWeaponFire(Event hEvent, const char[] sName, bool bBroadcast)
 {
-	int iClient = GetClientOfUserId(hEvent.GetInt("userid"));
+	static int iItemFlags /*, iWeaponID */, iUserID, iClient;
+	static char sWeaponName[64]/*, sClientName[128]*/;
+	iUserID = hEvent.GetInt("userid");
+	//iWeaponID = hEvent.GetInt("weaponid");
+	iClient = GetClientOfUserId(iUserID);
 	if (!IsFakeClient(iClient))return;
-
-	static char sWeaponName[64]; 
+	
 	hEvent.GetString("weapon", sWeaponName, sizeof(sWeaponName));
+	
+	if (!g_bInitItemFlags)
+	{
+		InitItemFlagMap();
+		//if(g_bCvar_Debug)
+		//	PrintToServer("Event_OnWeaponFire: g_hItemFlagMap not initialized, doing now");
+	}
+	g_hItemFlagMap.GetValue(sWeaponName, iItemFlags);
 
-	if (GetRandomInt(1, g_iCvar_FireBash_Chance1) == 1 && (strcmp(sWeaponName, "shotgun_chrome") == 0 || strcmp(sWeaponName, "pumpshotgun") == 0))
+	if ( GetRandomInt(1, g_iCvar_FireBash_Chance1) == 1 && iItemFlags & FLAG_SHOTGUN && iItemFlags & FLAG_TIER1 )
 	{
-		g_bSurvivorBot_ForceBash[iClient] = true;
+		g_bBot_ForceBash[iClient] = true;
 	}
-	else if (GetRandomInt(1, g_iCvar_FireBash_Chance2) == 1 && (strcmp(sWeaponName, "sniper_awp") == 0 || strcmp(sWeaponName, "sniper_scout") == 0))
+	else if ( GetRandomInt(1, g_iCvar_FireBash_Chance2) == 1 && iItemFlags & FLAG_SNIPER && iItemFlags & FLAG_CSS )
 	{
-		g_bSurvivorBot_ForceBash[iClient] = true;
+		g_bBot_ForceBash[iClient] = true;
 	}
+
+	// if nightmare, don't spray 'n pray 'n waste ammo (unless out target is really close)
+	int iCurTarget = g_iBot_TargetInfected[iClient];
+	if (g_bCvar_Nightmare && IsWeaponSlotActive(iClient, 0) && (!iCurTarget || iCurTarget != g_iBot_TankTarget[iClient] || GetEntityDistance(iClient, iCurTarget, true) > 16384.0)) // 128
+	{
+		float fMinDelay = 0.1, fMaxDelay = 0.15;
+		if ((iItemFlags & FLAG_SNIPER))
+		{
+			fMinDelay = 0.2;
+			fMaxDelay = ((iItemFlags & FLAG_CSS) ? 0.5 : 0.33);
+		}
+		else if ((iItemFlags & FLAG_SHOTGUN))
+		{
+			fMinDelay = 0.33;
+			fMaxDelay = 0.66;
+		}
+
+		g_fBot_BlockWeaponAttackTime[iClient] = (GetGameTime() + GetRandomFloat(fMinDelay, fMaxDelay));
+	}
+	
+	RequestFrame(NullifyAimPunch, iClient);
+}
+
+void NullifyAimPunch(int iClient)
+{
+	if(IsValidClient(iClient))
+		SetEntPropVector(iClient, Prop_Send, "m_vecPunchAngle", view_as<float>({ 0.0, 0.0, 0.0 }));
 }
 
 void Event_OnPlayerDeath(Event hEvent, const char[] sName, bool bBroadcast)
@@ -1244,30 +1555,67 @@ void Event_OnPlayerDeath(Event hEvent, const char[] sName, bool bBroadcast)
 	int iAttacker = GetClientOfUserId(hEvent.GetInt("attacker"));
 	int iInfected = hEvent.GetInt("entityid");
 
-	if (g_iSurvivorBot_TargetInfected[iAttacker] == iVictim || g_iSurvivorBot_TargetInfected[iAttacker] == iInfected)
-	{
-		g_iSurvivorBot_TargetInfected[iAttacker] = -1;
-	}
+	int iCurTarget = g_iBot_TargetInfected[iAttacker];
+	if (iCurTarget == iVictim || iCurTarget == iInfected)
+		g_iBot_TargetInfected[iAttacker] = 0;
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		g_iSurvivorBot_VisionMemory_State[i][iVictim] = g_iSurvivorBot_VisionMemory_State_FOV[i][iVictim] = 0;
-		g_fSurvivorBot_VisionMemory_Time[i][iVictim] = g_fSurvivorBot_VisionMemory_Time_FOV[i][iVictim] = GetGameTime();
+		g_iBot_VisionMemory_State[i][iVictim] = g_iBot_VisionMemory_State_FOV[i][iVictim] = 0;
+		g_fBot_VisionMemory_Time[i][iVictim] = g_fBot_VisionMemory_Time_FOV[i][iVictim] = GetGameTime();
 	}
 
 	g_bInfectedBot_IsThrowing[iVictim] = false;
 	g_fInfectedBot_CoveredInVomitTime[iVictim] = GetGameTime();
 }
 
+void Event_OnIncap(Event hEvent, const char[] sName, bool bBroadcast)
+{
+	static int iClient, iUserID, iSecondarySlot, iEntRef, iIndex;
+	iUserID = hEvent.GetInt("userid");
+	iClient = GetClientOfUserId(iUserID);
+
+	iSecondarySlot = GetWeaponInInventory(iClient, 1);
+	if (iSecondarySlot)
+	{
+		iEntRef = EntIndexToEntRef(iSecondarySlot);
+		iIndex = g_hForbiddenItemList.Push(iEntRef);
+		g_hForbiddenItemList.Set(iIndex, iClient, 1);
+	}
+}
+
+void Event_OnRevive(Event hEvent, const char[] sName, bool bBroadcast)
+{
+	static int iClient, iUserID, iOwner, iEntIndex;
+	iUserID = hEvent.GetInt("subject");
+	iClient = GetClientOfUserId(iUserID);
+	
+	for (int i = 0; i < g_hForbiddenItemList.Length; i++)
+	{
+		iEntIndex = EntRefToEntIndex(g_hForbiddenItemList.Get(i));
+		iOwner = g_hForbiddenItemList.Get(i, 1);
+		if (iEntIndex == INVALID_ENT_REFERENCE || !L4D_IsValidEnt(iEntIndex) || iClient == iOwner)
+		{
+			g_hForbiddenItemList.Erase(i);
+			continue;
+		}
+	}
+}
+
 // Mark entity as used by certain client
 void Event_OnPlayerUse(Event hEvent, const char[] sName, bool bBroadcast)
 {
-	int iClient = GetClientOfUserId(hEvent.GetInt("userid"));
-	int iEntity = hEvent.GetInt("targetid");
-
-	int iUsedMask = (g_iItem_Used[iEntity] | 0);
-	iUsedMask |= ( 1 << (iClient - 1) );
-	g_iItem_Used[iEntity] = iUsedMask;
+	static int iClient, iEntity;
+	iClient = GetClientOfUserId(hEvent.GetInt("userid"));
+	iEntity = hEvent.GetInt("targetid");
+	
+	g_iItem_Used[iEntity] |= (1 << (iClient - 1));
+	if (IsFakeClient(iClient) && iEntity == g_iBot_ScavengeItem[iClient] && g_iWeaponID[iEntity])
+	{
+		ClearMoveToPosition(iClient, "ScavengeItem");
+		g_iBot_ScavengeItem[iClient] = 0;
+		g_fBot_ScavengeItemDist[iClient] = -1.0;
+	}
 }
 
 void Event_OnSurvivorGrabbed(Event hEvent, const char[] sName, bool bBroadcast)
@@ -1279,7 +1627,7 @@ void Event_OnSurvivorGrabbed(Event hEvent, const char[] sName, bool bBroadcast)
 	{
 		if (!IsClientSurvivor(i) || !IsFakeClient(i))continue;
 		float fReactTime = GetRandomFloat(0.33, 0.66); if (i == iVictim)fReactTime *= 0.5;
-		g_fSurvivorBot_PinnedReactTime[i] = GetGameTime() + fReactTime;
+		g_fBot_PinnedReactTime[i] = GetGameTime() + fReactTime;
 	}
 }
 
@@ -1340,26 +1688,50 @@ void Event_OnChargeStart(Event hEvent, const char[] sName, bool bBroadcast)
 
 void Event_OnWitchHaraserSet(Event hEvent, const char[] sName, bool bBroadcast)
 {
-	int iClient = GetClientOfUserId(hEvent.GetInt("userid"));
-	if (!IsValidClient(iClient) || !IsPlayerAlive(iClient) || GetClientTeam(iClient) != 2)return;
+	int iUserID = hEvent.GetInt("userid");
+	int iClient = GetClientOfUserId(iUserID);
+	if (!IsClientSurvivor(iClient))return;
 
 	int iWitch = hEvent.GetInt("witchid");
+	static int iWitchRef;
 
-	int iWitchRef;
 	for (int i = 0; i < g_hWitchList.Length; i++)
 	{
 		iWitchRef = EntRefToEntIndex(g_hWitchList.Get(i));
-		if (iWitchRef == INVALID_ENT_REFERENCE || !IsEntityExists(iWitchRef))
+		if (iWitchRef == INVALID_ENT_REFERENCE || !L4D_IsValidEnt(iWitchRef))
 		{
 			g_hWitchList.Erase(i);
 			continue;
 		}
+
 		if (iWitchRef == iWitch)
 		{
-			g_hWitchList.Set(i, hEvent.GetInt("userid"), 1);
+			g_hWitchList.Set(i, iUserID, 1);
 			break;
 		}
 	}
+}
+
+Action CmdDumpCvars(int client, int args)
+{
+	static char szOutputBuffer[64];
+	
+	GetConVarString(g_hCvar_AutoShove_Enabled, szOutputBuffer, 64);
+	PrintToServer("g_hCvar_AutoShove_Enabled %s", szOutputBuffer);
+	PrintToServer("g_iCvar_AutoShove_Enabled %d", g_iCvar_AutoShove_Enabled);
+	
+	GetConVarString(g_hCvar_ImprovedMelee_Enabled, szOutputBuffer, 64);
+	PrintToServer("g_hCvar_ImprovedMelee_Enabled %s", szOutputBuffer);
+	PrintToServer("g_bCvar_ImprovedMelee_Enabled %b", g_bCvar_ImprovedMelee_Enabled);
+	
+	GetConVarString(g_hCvar_TargetSelection_Enabled, szOutputBuffer, 64);
+	PrintToServer("g_hCvar_TargetSelection_Enabled %s", szOutputBuffer);
+	PrintToServer("g_bCvar_TargetSelection_Enabled %b", g_bCvar_TargetSelection_Enabled);
+	
+	GetConVarString(g_hCvar_ItemScavenge_Items, szOutputBuffer, 64);
+	PrintToServer("g_hCvar_ItemScavenge_Items %s", szOutputBuffer);
+	PrintToServer("g_iCvar_ItemScavenge_Items %d", g_iCvar_ItemScavenge_Items);
+	return Plugin_Handled;
 }
 
 public Action OnPlayerRunCmd(int iClient, int &iButtons, int &iImpulse, float fVel[3], float fAngles[3])
@@ -1369,44 +1741,68 @@ public Action OnPlayerRunCmd(int iClient, int &iButtons, int &iImpulse, float fV
 	GetClientAbsOrigin(iClient, g_fClientAbsOrigin[iClient]);
 	GetEntityCenteroid(iClient, g_fClientCenteroid[iClient]);
 	g_iClientNavArea[iClient] = L4D_GetLastKnownArea(iClient);
-
+	
 	if (!IsClientSurvivor(iClient))
 		return Plugin_Continue;
 
 	g_bClient_IsFiringWeapon[iClient] = false;
 	g_bClient_IsLookingAtPosition[iClient] = false;
+	g_iClientInvFlags[iClient] = 0;
 
-	int iWpnSlot, iWpnSlots[6]; 
-	for (int i = 0; i <= 5; i++)
+	int iWpnSlot, iWpnSlots[6];
+
+	// instead of comparing strings
+	// we represent survivors’ inventory as bit flags
+	for (int i = 0; i < 6; i++)
 	{
 		iWpnSlot = GetPlayerWeaponSlot(iClient, i);
-		iWpnSlots[i] = (!IsEntityWeapon(iWpnSlot, true) ? -1 : iWpnSlot);
+		if (L4D_IsValidEnt(iWpnSlot))
+		{
+			iWpnSlots[i] = iWpnSlot;
+			g_iClientInvFlags[iClient] |= g_iItemFlags[iWpnSlot];
+
+			if (g_iWeaponID[iWpnSlot] == 1 
+			&& (GetEntProp(iWpnSlot, Prop_Send, "m_isDualWielding") != 0 || GetEntProp(iWpnSlot, Prop_Send, "m_hasDualWeapons") != 0))
+				g_iClientInvFlags[iClient] |= FLAG_PISTOL_EXTRA;
+		}
+		else
+			iWpnSlots[i] = 0;
 	}
 	g_iClientInventory[iClient] = iWpnSlots;
 
-	if (iWpnSlots[0] != -1)
+	if (iWpnSlots[0] != 0)
 	{
 		g_iWeapon_Clip1[iWpnSlots[0]] = GetWeaponClip1(iWpnSlots[0]);
 		g_iWeapon_MaxAmmo[iWpnSlots[0]] = GetWeaponMaxAmmo(iWpnSlots[0]);
 		g_iWeapon_AmmoLeft[iWpnSlots[0]] = GetClientPrimaryAmmo(iClient);
 	}
-	if (iWpnSlots[1] != -1)
+	if (iWpnSlots[1] != 0)
 	{
 		g_iWeapon_Clip1[iWpnSlots[1]] = GetWeaponClip1(iWpnSlots[1]);
 	}
 
-	if (g_bCvar_BotsDisabled || g_bCutsceneIsPlaying || !g_iClientNavArea[iClient] || GetGameTime() <= g_fClient_ThinkFunctionDelay[iClient] || !IsFakeClient(iClient))
-		return Plugin_Continue;
-
-	SurvivorBotThink(iClient, iButtons, iWpnSlots);
-
-	if (GetGameTime() > g_fBotProcessing_NextProcessTime && g_iBotProcessing_ProcessedCount >= GetTeamPlayerCount(2, true, true))
+	if (!IsFakeClient(iClient))
 	{
-		g_iBotProcessing_ProcessedCount = 0;
-		g_fBotProcessing_NextProcessTime = GetGameTime() + g_fCvar_NextProcessTime;
-		for (int i = 1; i <= MaxClients; i++)g_bBotProcessing_IsProcessed[i] = false;
+		return Plugin_Continue;
 	}
 
+	if (g_bCvar_BotsDisabled || g_bCutsceneIsPlaying || !g_iClientNavArea[iClient] || GetGameTime() <= g_fClient_ThinkFunctionDelay[iClient])
+		return Plugin_Continue;
+
+	static int iGameDifficulty, iAliveBots;
+	static bool bShouldUseFlow;
+
+	iAliveBots = SurvivorBotThink(iClient, iButtons, iWpnSlots, g_iClientInvFlags[iClient], iGameDifficulty, bShouldUseFlow);
+	if (g_iBotProcessing_ProcessedCount >= iAliveBots)
+	{
+		iGameDifficulty = GetCurrentGameDifficulty();
+		bShouldUseFlow = ShouldUseFlowDistance();
+
+		g_iBotProcessing_ProcessedCount = 0;
+		for (int i = 1; i <= MaxClients; i++)
+			g_bBotProcessing_IsProcessed[i] = false;
+	}
+	
 	return Plugin_Continue;
 }
 
@@ -1420,9 +1816,10 @@ public void L4D_OnReleaseSurvivorPositions()
 	g_bCutsceneIsPlaying = false;
 }
 
-int GetClientWeaponInventory(int iClient, int iSlot)
+int GetWeaponInInventory(int iClient, int iSlot)
 {
-	return (g_iClientInventory[iClient][iSlot]);
+	int iWpn = g_iClientInventory[iClient][iSlot];
+	return (!L4D_IsValidEnt(iWpn) ? 0 : iWpn);
 }
 
 public void L4D_OnCThrowActivate_Post(int iAbility)
@@ -1448,313 +1845,464 @@ stock void VScript_DebugDrawLine(float fStartPos[3], float fEndPos[3], int iColo
 	L4D2_ExecVScriptCode(sScriptCode);
 }
 
-void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
+void OnGrenadeThrown(int iClient, bool bIsMolotov)
 {
-	g_iSurvivorBot_DefibTarget[iClient] = -1;
-	g_bSurvivorBot_PreventFire[iClient] = false;
+	if (!(1 <= iClient <= MaxClients))
+		return;
 
-	int iCurWeapon = L4D_GetPlayerCurrentWeapon(iClient);
+	g_iClientInventory[iClient][2] = 0;
 
-	static int iTeamLeader, iGameDifficulty, iDefibTarget, iTeamCount, iAlivePlayers, iTankRock, iTankTarget, iWitchHarasser, iTankProp;
-	static bool bFriendIsNearBoomer, bFriendIsNearThrowArea, bTeamHasHumanPlayer; 
-	if (!g_bBotProcessing_IsProcessed[iClient] && GetGameTime() > g_fBotProcessing_NextProcessTime)
+	if (bIsMolotov)
+		g_fBot_Grenade_NextThrowTime_Molotov = GetGameTime() + GetRandomFloat(g_fCvar_GrenadeThrow_NextThrowTime1, g_fCvar_GrenadeThrow_NextThrowTime2);
+	else
+		g_fBot_Grenade_NextThrowTime = GetGameTime() + GetRandomFloat(g_fCvar_GrenadeThrow_NextThrowTime1, g_fCvar_GrenadeThrow_NextThrowTime2);
+
+	// PrintToServer("%N = %f, %d", iClient,
+	// 	(bIsMolotov ? g_fBot_Grenade_NextThrowTime_Molotov : g_fBot_Grenade_NextThrowTime) - GetGameTime(),
+	// 	bIsMolotov
+	// );
+}
+public void L4D_PipeBombProjectile_Post(int client, int projectile, const float vecPos[3], const float vecAng[3], const float vecVel[3], const float vecRot[3])
+{
+	OnGrenadeThrown(client, false);
+}
+public void L4D2_VomitJarProjectile_Post(int client, int projectile, const float vecPos[3], const float vecAng[3], const float vecVel[3], const float vecRot[3])
+{
+	OnGrenadeThrown(client, false);
+}
+public void L4D_MolotovProjectile_Post(int client, int projectile, const float vecPos[3], const float vecAng[3], const float vecVel[3], const float vecRot[3])
+{
+	OnGrenadeThrown(client, true);
+}
+
+int SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6], int iInvFlags, int iGameDifficulty, bool bShouldUseFlow)
+{
+	g_bBot_PreventFire[iClient] = false;
+
+	// -------------------------
+
+	float fCurTime = GetGameTime();
+
+	static int iAliveBots = 0;
+	static int iTeamLeader, iTeamCount, iAlivePlayers;
+	static int iWitchRef, iHarasserRef, iWitchHarasser;
+	static float fLeaderDist;
+	static bool bClientIsAttacking;
+
+	static int iClientTeam;
+	static L4D2ZombieClassType iClientClass;
+	static float fLastDist, fClientDist[5];
+	static bool bClientIsBot, bClientIsUsingAbility;
+
+	static int iFindEntRef, iThrownPipeBomb;
+	static float fCurDist, fTargetDist, fInfectedPos[3];
+	static bool bBileWasThrown, bInfectedIsChasing, bInfectedIsVisible;
+
+	// -------------------------
+
+	if (!g_bBotProcessing_IsProcessed[iClient] && fCurTime >= g_fBotProcessing_NextProcessTime)
 	{
-		g_iSurvivorBot_NearbyFriends[iClient] = 0;
-		g_iSurvivorBot_TargetInfected[iClient] = GetClosestInfected(iClient, 4000.0);
-		g_iSurvivorBot_ThreatInfectedCount[iClient] = GetInfectedCount(iClient, 125.0);
-		g_iSurvivorBot_NearestInfectedCount[iClient] = GetInfectedCount(iClient, 300.0);
-		g_iSurvivorBot_NearbyInfectedCount[iClient] = GetInfectedCount(iClient, 500.0);
-		if (g_bCvar_GrenadeThrow_Enabled && iWpnSlots[2] != -1)
+		g_iBot_TankTarget[iClient] = 0;
+		g_iBot_TankProp[iClient] = 0;
+		g_iBot_TankRock[iClient] = 0;
+
+		g_iBot_DefibTarget[iClient] = 0;
+		g_iBot_PinnedFriend[iClient] = 0;
+		g_iBot_IncapacitatedFriend[iClient] = 0;
+		g_iBot_WitchTarget[iClient] = 0;
+
+		g_bBot_IsFriendNearThrowArea[iClient] = false;
+		g_bBot_IsFriendNearBoomer[iClient] = false;
+
+		g_iBot_NearbyFriends[iClient] = 0;
+		g_iBot_ThreatInfectedCount[iClient] = 0;
+		g_iBot_NearestInfectedCount[iClient] = 0;
+		g_iBot_NearbyInfectedCount[iClient] = 0;
+		g_iBot_GrenadeInfectedCount[iClient] = 0;
+
+		g_bBotProcessing_IsProcessed[iClient] = true;
+		g_iBotProcessing_ProcessedCount++;
+		g_fBotProcessing_NextProcessTime = (fCurTime + g_fCvar_NextProcessTime);
+
+		// -------------------------
+
+		fTargetDist = 16777216.0; // 4096
+		iThrownPipeBomb = (FindEntityByClassname(-1, "pipe_bomb_projectile"));
+		bBileWasThrown = (FindEntityByClassname(-1, "info_goal_infected_chase") != -1);
+
+		iFindEntRef = INVALID_ENT_REFERENCE;
+		while ((iFindEntRef = FindEntityByClassname(iFindEntRef, "infected")) != INVALID_ENT_REFERENCE)
 		{
-			g_iSurvivorBot_GrenadeInfectedCount[iClient] = GetInfectedCount(iClient, g_fCvar_GrenadeThrow_ThrowRange, CalculateGrenadeThrowInfectedCount(), _, false);
+			if (!IsCommonAlive(iFindEntRef) || !IsCommonAttacking(iFindEntRef))
+				continue;
+			
+			GetEntityCenteroid(iFindEntRef, fInfectedPos);
+			fCurDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fInfectedPos, true);
+			bInfectedIsVisible = IsVisibleVector(iClient, fInfectedPos, MASK_VISIBLE_AND_NPCS);
+
+			if (g_bCvar_GrenadeThrow_Enabled && iWpnSlots[2] && 
+				(fCurDist <= g_fCvar_GrenadeThrow_ThrowRange_NoVisCheck || 
+				bInfectedIsVisible && fCurDist <= g_fCvar_GrenadeThrow_ThrowRange_Sqr)
+			)
+				g_iBot_GrenadeInfectedCount[iClient]++;
+
+			if (!bInfectedIsVisible)
+				continue;
+
+			if (fCurDist <= 15625.0) // 125
+				g_iBot_ThreatInfectedCount[iClient]++;
+			if (fCurDist <= 90000.0) // 300
+				g_iBot_NearestInfectedCount[iClient]++;
+			if (fCurDist <= 250000.0) // 500
+				g_iBot_NearbyInfectedCount[iClient]++;
+
+			if (fCurDist > fTargetDist)
+				continue;
+
+			bInfectedIsChasing = (fCurDist > 25600.0 && (bBileWasThrown || iThrownPipeBomb > 0 && GetEntityDistance(iFindEntRef, iThrownPipeBomb, true) <= 65536.0)); //160 & 256
+			if (!bInfectedIsChasing && fCurDist > 9216.0) // 96
+			{
+				for (int i = 1; i <= MaxClients; i++)
+				{
+					bInfectedIsChasing = (iClient != i && IsClientSurvivor(i) && g_iBot_TargetInfected[i] == iFindEntRef && IsWeaponSlotActive(i, 1) && g_iBot_TargetInfected[i] && SurvivorHasMeleeWeapon(i) != 0);
+					if (bInfectedIsChasing)break;
+				}
+			}
+
+			if (bInfectedIsChasing)
+				continue;
+
+			g_iBot_TargetInfected[iClient] = iFindEntRef;
+			fTargetDist = fCurDist;
 		}
 
+		// -------------------------
+
 		iTeamLeader = iClient;
-		iGameDifficulty = GetCurrentGameDifficulty();
-		iTeamCount = GetTeamPlayerCount(2);
-		iAlivePlayers = 1;
-		
-		iTankTarget = 0;
-		g_iSurvivorBot_PinnedFriend[iClient] = 0;
-		g_iSurvivorBot_IncapacitatedFriend[iClient] = 0;
+		bClientIsAttacking = false;
+		g_bTeamHasHumanPlayer = false;
 
-		bFriendIsNearThrowArea = false;
-		bFriendIsNearBoomer = false;
-		bTeamHasHumanPlayer = false;
+		iTeamCount = 0;
+		iAlivePlayers = 1; // One is us
+		iAliveBots = 0;
 
-		int iTeam;
-		L4D2ZombieClassType iClientClass;
-		float fCurDist, fCurDist2;
-		float fLastDist = -1.0;
-		float fLastDist2 = -1.0;
-		float fLastDist3 = -1.0;
-		float fLastDist4 = -1.0;
-		bool bUseFlowDist = ShouldUseFlowDistance();
+		fClientDist[0] = MAX_MAP_RANGE_SQR; // Pinned By Special Friend
+		fClientDist[1] = MAX_MAP_RANGE_SQR; // Incapacitated Friend
+		fClientDist[2] = MAX_MAP_RANGE_SQR; // Tank
+		fClientDist[3] = MAX_MAP_RANGE_SQR; // Leader, No Flow
+		fClientDist[4] = 0.0; // Leader, Flow
 
 		for (int i = 1; i <= MaxClients; i++)
 		{
-			if (!IsClientInGame(i) || !IsPlayerAlive(i))
+			if (!IsClientInGame(i))
 				continue;
 
-			fCurDist = GetClientDistance(iClient, i, true);
-			iTeam = GetClientTeam(i);
+			iClientTeam = GetClientTeam(i);
+			if (iClientTeam == 2)iTeamCount++;
 
-			if (iTeam == 2)
+			if (!IsPlayerAlive(i))continue;
+			fCurDist = GetClientDistance(iClient, i, true);
+	
+			if (iClientTeam == 2)
 			{
-				if (!bTeamHasHumanPlayer || !IsFakeClient(i))
+				bClientIsBot = IsFakeClient(i);
+				if (bClientIsBot)iAliveBots++;
+
+				if (!g_bTeamHasHumanPlayer || !bClientIsBot)
 				{
-					fCurDist2 = ((bUseFlowDist && !bTeamHasHumanPlayer) ? L4D2Direct_GetFlowDistance(i) : fCurDist);
-					if (fLastDist4 == -1.0 || bUseFlowDist && !bTeamHasHumanPlayer && fCurDist2 > fLastDist4 || fCurDist2 < fLastDist4)
+					if (bShouldUseFlow && !g_bTeamHasHumanPlayer)
 					{
-						iTeamLeader = i;
-						fLastDist4 = fCurDist2;
-						if (!bTeamHasHumanPlayer)bTeamHasHumanPlayer = (!IsFakeClient(i));
+						fLeaderDist = L4D2Direct_GetFlowDistance(i);
+						if (fLeaderDist > fClientDist[4])
+						{
+							iTeamLeader = i;
+							fClientDist[4] = fLeaderDist;
+
+							if (!g_bTeamHasHumanPlayer)
+								g_bTeamHasHumanPlayer = !bClientIsBot;
+						}
+					}
+					else
+					{
+						fLeaderDist = fCurDist;
+						if (fLeaderDist < fClientDist[3])
+						{
+							iTeamLeader = i;
+							fClientDist[3] = fLeaderDist;
+
+							if (!g_bTeamHasHumanPlayer)
+								g_bTeamHasHumanPlayer = !bClientIsBot;
+						}
 					}
 				}
 
-				if (i == iClient)
-					continue;
-
+				if (i == iClient)continue;
 				iAlivePlayers++;
 
-				if ((fLastDist == -1.0 || fCurDist < fLastDist) && L4D_IsPlayerPinned(i))
+				if (fCurDist < fClientDist[0] && L4D_IsPlayerPinned(i))
 				{
-					g_iSurvivorBot_PinnedFriend[iClient] = i;
-					fLastDist = fCurDist;
-				}
-				
-				if ((fLastDist2 == -1.0 || fCurDist < fLastDist2) && L4D_IsPlayerIncapacitated(i))
-				{
-					g_iSurvivorBot_IncapacitatedFriend[iClient] = i;
-					fLastDist2 = fCurDist;
+					g_iBot_PinnedFriend[iClient] = i;
+					fClientDist[0] = fCurDist;
 				}
 
-				if (!bFriendIsNearBoomer)
+				if (fCurDist < fClientDist[1] && L4D_IsPlayerIncapacitated(i))
+				{
+					g_iBot_IncapacitatedFriend[iClient] = i;
+					fClientDist[1] = fCurDist;
+				}
+
+				if (!g_bBot_IsFriendNearBoomer[iClient])
 				{
 					for (int j = 1; j <= MaxClients; j++)
 					{
-						bFriendIsNearBoomer = (j != iClient && j != i && IsClientInGame(j) && GetClientTeam(j) == 3 && IsPlayerAlive(j) && !L4D_IsPlayerGhost(j) && 
+						g_bBot_IsFriendNearBoomer[iClient] = (j != iClient && j != i && IsClientInGame(j) && GetClientTeam(j) == 3 && IsPlayerAlive(j) && !L4D_IsPlayerGhost(j) && 
 							GetClientDistance(i, j, true) <= BOT_BOOMER_AVOID_RADIUS_SQR && L4D2_GetPlayerZombieClass(j) == L4D2ZombieClass_Boomer && IsVisibleEntity(j, i, MASK_VISIBLE_AND_NPCS)
 						);
-						if (bFriendIsNearBoomer)break;
+						if (g_bBot_IsFriendNearBoomer[iClient])break;
 					}
 				}
 
-				if (fCurDist <= 262144.0 && !L4D_IsPlayerIncapacitated(i) && !L4D_IsPlayerPinned(i))
-					g_iSurvivorBot_NearbyFriends[iClient] += 1;
-				
-				if (!bFriendIsNearThrowArea)
-					bFriendIsNearThrowArea = (GetVectorDistance(g_fClientAbsOrigin[i], g_fSurvivorBot_Grenade_ThrowPos[iClient], true) <= BOT_GRENADE_CHECK_RADIUS_SQR && IsEntityExists(g_iSurvivorBot_Grenade_ThrowTarget[iClient]) && SurvivorHasGrenade(iClient) == 2);
+				if (fCurDist <= 262144.0 && !L4D_IsPlayerIncapacitated(i) && !L4D_IsPlayerPinned(i)) // 512
+					g_iBot_NearbyFriends[iClient]++;
+
+				if (!g_bBot_IsFriendNearThrowArea[iClient] && g_iBot_Grenade_ThrowTarget[iClient])
+					g_bBot_IsFriendNearThrowArea[iClient] = (GetVectorDistance(g_fClientAbsOrigin[i], g_fBot_Grenade_ThrowPos[iClient], true) <= BOT_GRENADE_CHECK_RADIUS_SQR);
 			}
-			else if (iTeam == 3 && !L4D_IsPlayerGhost(i))
+			else if (iClientTeam == 3 && !L4D_IsPlayerGhost(i))
 			{
 				iClientClass = L4D2_GetPlayerZombieClass(i);
-				if ((fLastDist3 == -1.0 || fCurDist < fLastDist3) && iClientClass == L4D2ZombieClass_Tank && !L4D_IsPlayerIncapacitated(i) && (fCurDist <= 1048576.0 || fCurDist <= 16777216.0 && IsVisibleEntity(iClient, i)))
+				if (iClientClass == L4D2ZombieClass_Tank)
 				{
-					iTankTarget = i;
-					fLastDist3 = fCurDist;
+					if (fCurDist < fClientDist[2] && !L4D_IsPlayerIncapacitated(i) && (fCurDist <= 1048576.0 || fCurDist <= 16777216.0 && IsVisibleEntity(iClient, i))) // 1024 & 4096
+					{
+						g_iBot_TankTarget[iClient] = i;
+						fClientDist[2] = fCurDist;
+					}
+				}
+				else 
+				{
+					bClientIsUsingAbility = IsUsingSpecialAbility(i);
+					if (fCurDist < fTargetDist && (!bClientIsAttacking || bClientIsUsingAbility) && IsVisibleEntity(iClient, i))
+					{
+						g_iBot_TargetInfected[iClient] = i;
+						fTargetDist = fCurDist;
+						bClientIsAttacking = bClientIsUsingAbility;
+					}
 				}
 			}
 		}
 
-		iDefibTarget = 0;
+		// -------------------------
+
 		if (g_bCvar_DefibRevive_Enabled)
 		{			
-			fLastDist = -1.0;
-			int iSurvivor = INVALID_ENT_REFERENCE;
-			while ((iSurvivor = FindEntityByClassname(iSurvivor, "survivor_death_model")) != INVALID_ENT_REFERENCE)
+			fLastDist = MAX_MAP_RANGE_SQR;
+			
+			iFindEntRef = INVALID_ENT_REFERENCE;
+			while ((iFindEntRef = FindEntityByClassname(iFindEntRef, "survivor_death_model")) != INVALID_ENT_REFERENCE)
 			{
-				fCurDist = GetEntityDistance(iClient, iSurvivor, true);
-				if (fLastDist == -1.0 || fCurDist < fLastDist)
+				fCurDist = GetEntityDistance(iClient, iFindEntRef, true);
+				if (fCurDist < fLastDist)
 				{
-					iDefibTarget = iSurvivor;				
+					g_iBot_DefibTarget[iClient] = iFindEntRef;				
 					fLastDist = fCurDist;
 				}
 			}
 		}
 
-		iTankProp = -1;
-		iTankRock = -1;
-		if (iTankTarget != 0)
+		if (g_iBot_TankTarget[iClient])
 		{
-			fLastDist = -1.0;
-			int iPropRock = INVALID_ENT_REFERENCE;
-			while ((iPropRock = FindEntityByClassname(iPropRock, "tank_rock")) != INVALID_ENT_REFERENCE)
+			fLastDist = MAX_MAP_RANGE_SQR;
+			iFindEntRef = INVALID_ENT_REFERENCE;
+			while ((iFindEntRef = FindEntityByClassname(iFindEntRef, "tank_rock")) != INVALID_ENT_REFERENCE)
 			{
-				fCurDist = GetEntityDistance(iClient, iPropRock, true);
-				if (fLastDist != -1.0 && fCurDist >= fLastDist || !IsVisibleEntity(iClient, iPropRock))
+				fCurDist = GetEntityDistance(iClient, iFindEntRef, true);
+				if (fCurDist >= fLastDist || !IsVisibleEntity(iClient, iFindEntRef))
 					continue;
 
-				iTankRock = iPropRock;
+				g_iBot_TankRock[iClient] = iFindEntRef;
 				fLastDist = fCurDist;
 			}
 
-			fLastDist = -1.0;
-			iPropRock = INVALID_ENT_REFERENCE;
-			while ((iPropRock = FindEntityByClassname(iPropRock, "prop_car_alarm")) != INVALID_ENT_REFERENCE)
+			fLastDist = MAX_MAP_RANGE_SQR;
+			iFindEntRef = INVALID_ENT_REFERENCE;
+			while ((iFindEntRef = FindEntityByClassname(iFindEntRef, "prop_car_alarm")) != INVALID_ENT_REFERENCE)
 			{
-				fCurDist = GetEntityDistance(iTankTarget, iPropRock, true);
-				if (fCurDist > 250000.0 || fLastDist != -1.0 && fCurDist >= fLastDist || !IsVisibleEntity(iTankTarget, iPropRock) || !IsVisibleEntity(iClient, iPropRock))
+				fCurDist = GetEntityDistance(g_iBot_TankTarget[iClient], iFindEntRef, true);
+				if (fCurDist > 250000.0 || fCurDist >= fLastDist || !IsVisibleEntity(g_iBot_TankTarget[iClient], iFindEntRef) || !IsVisibleEntity(iClient, iFindEntRef)) // 500
 					continue;
 
-				iTankProp = iPropRock;
+				g_iBot_TankProp[iClient] = iFindEntRef;
 				fLastDist = fCurDist;
 			}
-			iPropRock = INVALID_ENT_REFERENCE;
-			while ((iPropRock = FindEntityByClassname(iPropRock, "prop_physics")) != INVALID_ENT_REFERENCE)
+			while ((iFindEntRef = FindEntityByClassname(iFindEntRef, "prop_physics")) != INVALID_ENT_REFERENCE)
 			{
-				fCurDist = GetEntityDistance(iTankTarget, iPropRock, true);
-				if (fCurDist > 250000.0 || fLastDist != -1.0 && fCurDist >= fLastDist || !GetEntProp(iPropRock, Prop_Send, "m_hasTankGlow") || !IsVisibleEntity(iTankTarget, iPropRock) || !IsVisibleEntity(iClient, iPropRock))
+				fCurDist = GetEntityDistance(g_iBot_TankTarget[iClient], iFindEntRef, true);
+				if (fCurDist > 250000.0 || fCurDist >= fLastDist || !GetEntProp(iFindEntRef, Prop_Send, "m_hasTankGlow") || !IsVisibleEntity(g_iBot_TankTarget[iClient], iFindEntRef) || !IsVisibleEntity(iClient, iFindEntRef)) // 500
 					continue;
 
-				iTankProp = iPropRock;
+				g_iBot_TankProp[iClient] = iFindEntRef;
 				fLastDist = fCurDist;
 			}
 		}
 
-		g_iSurvivorBot_WitchTarget[iClient] = -1;
-
-		iWitchHarasser = 0;
-		fLastDist = -1.0;
-		int iWitchRef, iHarasserRef;
+		fLastDist = MAX_MAP_RANGE_SQR;
 		for (int i = 0; i < g_hWitchList.Length; i++)
 		{
 			iWitchRef = EntRefToEntIndex(g_hWitchList.Get(i));
-			if (iWitchRef == INVALID_ENT_REFERENCE || !IsEntityExists(iWitchRef))
+			if (iWitchRef == INVALID_ENT_REFERENCE || !L4D_IsValidEnt(iWitchRef))
 			{
 				g_hWitchList.Erase(i);
 				continue;
 			}
-			
-			iHarasserRef = GetClientOfUserId(g_hWitchList.Get(i, 1));
-			if (iWitchHarasser != 0 && iHarasserRef == 0)continue;
+
+			iHarasserRef = g_hWitchList.Get(i, 1);
+			if (iHarasserRef != -1)
+				iHarasserRef = GetClientOfUserId(iHarasserRef);
+
+			if (iWitchHarasser && !iHarasserRef)
+				continue;
 
 			fCurDist = GetEntityDistance(iClient, iWitchRef, true);
-			if (fLastDist != -1.0 && fCurDist >= fLastDist)continue;
+			if (fCurDist >= fLastDist)continue;
+			fLastDist = fCurDist;
 
-			g_iSurvivorBot_WitchTarget[iClient] = iWitchRef;
-			iWitchHarasser = iHarasserRef; fLastDist = fCurDist;
+			g_iBot_WitchTarget[iClient] = iWitchRef;
+			iWitchHarasser = iHarasserRef;
 		}
-		g_bSurvivorBot_IsWitchHarasser[iClient] = (iWitchHarasser == iClient);
+		g_bBot_IsWitchHarasser[iClient] = (iWitchHarasser == iClient);
 
-		g_iBotProcessing_ProcessedCount++;
-		g_bBotProcessing_IsProcessed[iClient] = true;
+		if (fCurTime > g_fBot_NextScavengeItemScanTime[iClient])
+		{
+			g_iBot_ScavengeItem[iClient] = CheckForItemsToScavenge(iClient);		
+			g_fBot_NextScavengeItemScanTime[iClient] = (fCurTime + 1.0);
+		}
+
+		// PrintToServer("[%i] %N's Infected Count:\nThreat (125 hu.): %i\nNearest (300 hu.): %i\nNearby (500 hu.): %i\nFor Grenades (%.0f hu): %i\nShove Penalty: %i", 
+		// 	g_iBotProcessing_ProcessedCount, iClient,
+		// 	g_iBot_ThreatInfectedCount[iClient],
+		// 	g_iBot_NearestInfectedCount[iClient],
+		// 	g_iBot_NearbyInfectedCount[iClient],
+		// 	g_fCvar_GrenadeThrow_ThrowRange,
+		// 	g_iBot_GrenadeInfectedCount[iClient],
+		// 	L4D_GetPlayerShovePenalty(iClient)
+		// );
 	}
 
+	// -------------------------
+
 	if (L4D_IsPlayerHangingFromLedge(iClient))
-		return;
+		return iAliveBots;
 
 	if (GetEntityMoveType(iClient) == MOVETYPE_LADDER)
 	{
-		g_fSurvivorBot_TimeSinceLeftLadder[iClient] = GetGameTime() + 2.0;
-		return;
+		g_fBot_TimeSinceLeftLadder[iClient] = fCurTime + 5.0;
+		return iAliveBots;
 	}
 
-	if (IsValidVector(g_fSurvivorBot_LookPosition[iClient]))
+	if (IsValidVector(g_fBot_LookPosition[iClient]))
 	{ 
-		if (GetGameTime() < g_fSurvivorBot_LookPosition_Duration[iClient])
-		{
-			SnapViewToPosition(iClient, g_fSurvivorBot_LookPosition[iClient]);
-		}
+		if (fCurTime < g_fBot_LookPosition_Duration[iClient])
+			SnapViewToPosition(iClient, g_fBot_LookPosition[iClient]);
 		else
-		{
-			SetVectorToZero(g_fSurvivorBot_LookPosition[iClient]);
-		}
+			SetVectorToZero(g_fBot_LookPosition[iClient]);
 	}
 
-	if (iCurWeapon != -1)
+	int iCurWeapon = L4D_GetPlayerCurrentWeapon(iClient);
+	if (iCurWeapon)
 	{
-		if (iCurWeapon == iWpnSlots[0] && GetSurvivorBotWeaponPreference(iClient) == L4D_WEAPON_PREFERENCE_SECONDARY)
-		{
-			SwitchWeaponSlot(iClient, 1);
-		}
-
-		if (g_bSurvivorBot_ForceWeaponReload[iClient])
+		if (g_bBot_ForceWeaponReload[iClient])
 		{
 			iButtons |= IN_RELOAD;
-			g_bSurvivorBot_ForceWeaponReload[iClient] = false;
+			g_bBot_ForceWeaponReload[iClient] = false;
 		}
-		else if (GetGameTime() <= g_fSurvivorBot_BlockWeaponReloadTime[iClient])
+		else if (fCurTime <= g_fBot_BlockWeaponReloadTime[iClient])
 		{
 			iButtons &= ~IN_RELOAD;
 		}
 
-		if (!SurvivorBot_CanFreelyFireWeapon(iClient))
+		if (fCurTime <= g_fBot_BlockWeaponAttackTime[iClient] || !SurvivorBot_CanFreelyFireWeapon(iClient))
 		{
-			g_bSurvivorBot_PreventFire[iClient] = true;
+			g_bBot_PreventFire[iClient] = true;
 			iButtons &= ~IN_ATTACK;
 		}
 
-		if (g_bSurvivorBot_ForceBash[iClient])
+		if (g_bBot_ForceBash[iClient])
 		{
-			g_bSurvivorBot_ForceBash[iClient] = false;
+			g_bBot_ForceBash[iClient] = false;
 			iButtons |= IN_ATTACK2;
 		}
-	
-		if (iCurWeapon == iWpnSlots[0] && !IsWeaponReloading(iCurWeapon, false) && GetGameTime() > GetWeaponNextFireTime(iCurWeapon) 
-			&& LBI_IsSurvivorBotAvailable(iClient) && !LBI_IsSurvivorInCombat(iClient) && (SurvivorHasTier3Weapon(iClient) == 2 || 
-			GetWeaponClip1(iCurWeapon) == GetWeaponClipSize(iCurWeapon)) && SurvivorHasPistol(iClient) != 0 && GetWeaponClip1(iWpnSlots[1]) != GetWeaponClipSize(iWpnSlots[1]))
+		
+		if (iCurWeapon == iWpnSlots[0])
 		{
-			g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-			SwitchWeaponSlot(iClient, 1);
+			// if nightmare, don't reload our primary weapon 'til its clip is zero
+			if (g_bCvar_Nightmare)
+			{
+				if (g_iWeapon_Clip1[iCurWeapon] > 0 && !(iInvFlags & FLAG_SHOTGUN))
+					iButtons &= ~IN_RELOAD;
+
+				int iTarget = (L4D_IsValidEnt(g_iBot_TargetInfected[iClient]) ? g_iBot_TargetInfected[iClient] : 0);
+				if (g_bBot_PreventFire[iClient] && !g_iBot_PinnedFriend[iClient] && !g_iBot_IncapacitatedFriend[iClient] && !g_iBot_WitchTarget[iClient] && !g_iBot_TankTarget[iClient] && 
+						iTarget && !(1 <= iTarget <= MaxClients) && 
+						(iInvFlags & (FLAG_PISTOL | FLAG_PISTOL_EXTRA) && g_iBot_NearbyInfectedCount[iClient] <= GetCommonHitsUntilDown(iClient) && 
+						GetEntityDistance(iClient, iTarget, true) <= 262144.0 // 512
+					|| iInvFlags & FLAG_MELEE && GetEntityDistance(iClient, iTarget, true) <= g_fCvar_ImprovedMelee_ApproachRange)
+				)
+					SwitchWeaponSlot(iClient, 1);
+			}
+
+			if (GetBotWeaponPreference(iClient) == L4D_WEAPON_PREFERENCE_SECONDARY)
+			{
+				SwitchWeaponSlot(iClient, 1);
+			}
+			// if we're not occupied and our primary is loaded, switch to pistol (to reload)
+			else if (fCurTime > GetWeaponNextFireTime(iCurWeapon) && !IsWeaponReloading(iCurWeapon, false)
+				&& LBI_IsSurvivorBotAvailable(iClient) && !LBI_IsSurvivorInCombat(iClient) && ( iInvFlags & FLAG_M60 || GetWeaponClip1(iCurWeapon) == GetWeaponClipSize(iCurWeapon) )
+				&& iInvFlags & (FLAG_PISTOL | FLAG_PISTOL_EXTRA) && GetWeaponClip1(iWpnSlots[1]) != GetWeaponClipSize(iWpnSlots[1]))
+			{
+				g_bBot_ForceSwitchWeapon[iClient] = true;
+				SwitchWeaponSlot(iClient, 1);
+			}
 		}
 	}
 
-	int iPinnedFriend = g_iSurvivorBot_PinnedFriend[iClient];
-	if (IsValidVector(g_fSurvivorBot_MovePos_Position[iClient]))
+	int iPinnedFriend = g_iBot_PinnedFriend[iClient];
+	if (!IsValidClient(iPinnedFriend))
 	{
-		float fMovePos[3]; fMovePos = g_fSurvivorBot_MovePos_Position[iClient];
-		float fMoveDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos, true);						
-		float fMoveTolerance = g_fSurvivorBot_MovePos_Tolerance[iClient];
-		float fMoveDuration = g_fSurvivorBot_MovePos_Duration[iClient];
-
-		if (GetGameTime() > fMoveDuration || fMoveTolerance >= 0.0 && fMoveDist <= (fMoveTolerance*fMoveTolerance) || 
-			!g_bSurvivorBot_MovePos_IgnoreDamaging[iClient] && LBI_IsDamagingPosition(fMovePos) || !LBI_IsReachablePosition(iClient, fMovePos) || 
-			IsValidClient(iPinnedFriend) && L4D_GetPinnedInfected(iPinnedFriend) != 0 && L4D2_GetPlayerZombieClass(L4D_GetPinnedInfected(iPinnedFriend)) != L4D2ZombieClass_Smoker
-		)
-		{
-			ClearMoveToPosition(iClient);
-		}
-		else if (GetGameTime() > g_fSurvivorBot_NextMoveCommandTime[iClient])
-		{	
-			L4D2_CommandABot(iClient, 0, BOT_CMD_MOVE, fMovePos);
-			g_fSurvivorBot_NextMoveCommandTime[iClient] = GetGameTime() + BOT_CMD_MOVE_INTERVAL;
-		}
+		iPinnedFriend = 0;
 	}
-
-	int iInfectedTarget = g_iSurvivorBot_TargetInfected[iClient];
-	if (GetGameTime() > g_fSurvivorBot_PinnedReactTime[iClient] && IsValidClient(iPinnedFriend))
+	else
 	{
 		int iAttacker = L4D_GetPinnedInfected(iPinnedFriend);
-		if (IsValidClient(iAttacker))
+		if (iAttacker && fCurTime > g_fBot_PinnedReactTime[iClient])
 		{
 			float fAttackerAimPos[3]; GetTargetAimPart(iClient, iAttacker, fAttackerAimPos);			
+			float fFriendDist = GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iPinnedFriend], true);
 			bool bAttackerVisible = HasVisualContactWithEntity(iClient, iAttacker, false, fAttackerAimPos);
 
-			float fFriendDist = GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iPinnedFriend], true);
-			bool bCanShoot = (iCurWeapon != -1 && g_iCvar_HelpPinnedFriend_Enabled & (1 << 0) != 0 && fFriendDist <= (g_fCvar_HelpPinnedFriend_ShootRange*g_fCvar_HelpPinnedFriend_ShootRange) && (iCurWeapon != iWpnSlots[1] || !SurvivorHasMeleeWeapon(iClient) || GetClientDistance(iClient, iAttacker, true) <= (g_fCvar_ImprovedMelee_AttackRange*g_fCvar_ImprovedMelee_AttackRange)) && SurvivorBot_AbleToShootWeapon(iClient) && CheckIfCanRescueImmobilizedFriend(iClient));
+			bool bCanShoot = (g_iCvar_HelpPinnedFriend_Enabled & (1 << 0) != 0);
+			if (bCanShoot)
+				bCanShoot = (iCurWeapon && g_iCvar_HelpPinnedFriend_Enabled & (1 << 0) != 0 && fFriendDist <= g_fCvar_HelpPinnedFriend_ShootRange_Sqr
+					&& (iCurWeapon != iWpnSlots[1] || !SurvivorHasMeleeWeapon(iClient) || GetClientDistance(iClient, iAttacker, true) <= g_fCvar_ImprovedMelee_AttackRange_Sqr)
+					&& SurvivorBot_AbleToShootWeapon(iClient) && CheckIfCanRescueImmobilizedFriend(iClient)
+				);
 
 			int iCanShove;
 			if (g_iCvar_HelpPinnedFriend_Enabled & (1 << 1) != 0)
-			{
-				iCanShove = (fFriendDist <= (g_fCvar_HelpPinnedFriend_ShoveRange*g_fCvar_HelpPinnedFriend_ShoveRange) ? 1 : (GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iAttacker], true) <= (g_fCvar_HelpPinnedFriend_ShoveRange*g_fCvar_HelpPinnedFriend_ShoveRange) ? 2 : 0));
-			}
+				iCanShove = (fFriendDist <= g_fCvar_HelpPinnedFriend_ShoveRange_Sqr ? 1 : (GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iAttacker], true) <= g_fCvar_HelpPinnedFriend_ShoveRange_Sqr ? 2 : 0));
 
 			L4D2ZombieClassType iZombieClass = L4D2_GetPlayerZombieClass(iAttacker);
 			if (iZombieClass != L4D2ZombieClass_Smoker)
 			{
-				if (iWpnSlots[0] != -1 && g_iWeapon_AmmoLeft[iWpnSlots[0]] > 0 && g_iWeapon_Clip1[iWpnSlots[0]] > 0 && iCurWeapon == iWpnSlots[1] && SurvivorHasMeleeWeapon(iClient) && fFriendDist > g_fCvar_ImprovedMelee_AimRange)
+				if (iWpnSlots[0] && g_iWeapon_AmmoLeft[iWpnSlots[0]] > 0 && g_iWeapon_Clip1[iWpnSlots[0]] > 0 && iCurWeapon == iWpnSlots[1] && SurvivorHasMeleeWeapon(iClient) && fFriendDist > g_fCvar_ImprovedMelee_AimRange_Sqr)
 				{
-					g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
+					g_bBot_ForceSwitchWeapon[iClient] = true;
 					SwitchWeaponSlot(iClient, 0);
 				}
-				else
+				else if (bCanShoot && fFriendDist <= 262144.0 && iCurWeapon == iWpnSlots[0] && IsWeaponReloading(iCurWeapon) && GetWeaponClip1(iWpnSlots[1]) > 0 && !SurvivorHasShotgun(iClient) && !SurvivorHasSniperRifle(iClient) && !SurvivorHasMeleeWeapon(iClient))
 				{
-					if (bCanShoot && fFriendDist <= 262144.0 && iCurWeapon == iWpnSlots[0] && IsWeaponReloading(iCurWeapon) && GetWeaponClip1(iWpnSlots[1]) > 0 && !SurvivorHasShotgun(iClient) && !SurvivorHasSniperRifle(iClient) && !SurvivorHasMeleeWeapon(iClient))
-					{
-						g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-						SwitchWeaponSlot(iClient, 1);
-					}
+					g_bBot_ForceSwitchWeapon[iClient] = true;
+					SwitchWeaponSlot(iClient, 1);
 				}
 
 				if (iCanShove != 0 && iZombieClass != L4D2ZombieClass_Charger && !L4D_IsPlayerIncapacitated(iClient))
@@ -1765,26 +2313,22 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				else if (bCanShoot && bAttackerVisible)
 				{
 					SnapViewToPosition(iClient, fAttackerAimPos);
-					PressAttackButton(iClient, iButtons);
+					PressAttackButton(iClient, iButtons); // help pinned
 				}
 			}
 			else
 			{
-				if (!L4D_IsPlayerIncapacitated(iClient))
+				if (iCanShove != 0 && !L4D_IsPlayerIncapacitated(iClient))
 				{
-					if (iCanShove != 0)
-					{
-						SnapViewToPosition(iClient, (iCanShove == 1 ? g_fClientCenteroid[iPinnedFriend] : g_fClientCenteroid[iAttacker]));
-						iButtons |= IN_ATTACK2;
-					}
+					SnapViewToPosition(iClient, (iCanShove == 1 ? g_fClientCenteroid[iPinnedFriend] : g_fClientCenteroid[iAttacker]));
+					iButtons |= IN_ATTACK2;
 				}
-
-				if (bCanShoot)
+				else if (bCanShoot)
 				{
 					if (bAttackerVisible)
 					{
 						SnapViewToPosition(iClient, fAttackerAimPos);
-						PressAttackButton(iClient, iButtons);
+						PressAttackButton(iClient, iButtons); // help pinned
 					}
 					else 
 					{
@@ -1799,24 +2343,46 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 							fMidPos[2] = ((g_fClientEyePos[iAttacker][2] + fTipPos[2]) / 2.0);
 
 							SnapViewToPosition(iClient, (IsVisibleVector(iClient, fMidPos) ? fMidPos : fTipPos));
-							PressAttackButton(iClient, iButtons);
+							PressAttackButton(iClient, iButtons); // help pinned
 						}
 					}
 				}
 			}
 		}
 	}
+	
+	if (IsValidVector(g_fBot_MovePos_Position[iClient]))
+	{
+		float fMovePos[3]; fMovePos = g_fBot_MovePos_Position[iClient];
+		float fMoveDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos, true);						
+		float fMoveTolerance = g_fBot_MovePos_Tolerance[iClient];
+		float fMoveDuration = g_fBot_MovePos_Duration[iClient];
 
+		if (fCurTime > fMoveDuration || fMoveTolerance >= 0.0 && fMoveDist <= (fMoveTolerance*fMoveTolerance) || 
+			!g_bBot_MovePos_IgnoreDamaging[iClient] && LBI_IsDamagingPosition(fMovePos) || !LBI_IsReachablePosition(iClient, fMovePos, false) || 
+			iPinnedFriend && L4D_GetPinnedInfected(iPinnedFriend) && L4D2_GetPlayerZombieClass(L4D_GetPinnedInfected(iPinnedFriend)) != L4D2ZombieClass_Smoker
+		)
+		{
+			ClearMoveToPosition(iClient);
+		}
+		else if (fCurTime > g_fBot_NextMoveCommandTime[iClient])
+		{	
+			L4D2_CommandABot(iClient, 0, BOT_CMD_MOVE, fMovePos);
+			g_fBot_NextMoveCommandTime[iClient] = fCurTime + BOT_CMD_MOVE_INTERVAL;
+		}
+	}
+
+	int iTankTarget = g_iBot_TankTarget[iClient];
 	if (IsValidClient(iTankTarget))
 	{
 		int iVictim = g_iInfectedBot_CurrentVictim[iTankTarget];
 		float fTankDist = GetClientDistance(iClient, iTankTarget, true);
 		float fHeightDist = (fTankDist + (g_fClientAbsOrigin[iClient][2] - g_fClientAbsOrigin[iTankTarget][2]));
-		if (fHeightDist <= 1638400.0 && (g_bCvar_AvoidTanksWithProp && IsEntityExists(iTankProp) || g_bCvar_TakeCoverFromRocks && g_bInfectedBot_IsThrowing[iTankTarget]) && (iVictim == iClient || GetClientDistance(iClient, iVictim, true) <= 65536.0) && IsVisibleEntity(iClient, iTankTarget, MASK_SHOT_HULL))
+		if (fHeightDist <= 1638400.0 && (g_bCvar_AvoidTanksWithProp && g_iBot_TankProp[iClient] || g_bCvar_TakeCoverFromRocks && g_bInfectedBot_IsThrowing[iTankTarget]) && (iVictim == iClient || GetClientDistance(iClient, iVictim, true) <= 65536.0) && IsVisibleEntity(iClient, iTankTarget, MASK_SHOT_HULL))
 		{
-			if (strcmp(g_sSurvivorBot_MovePos_Name[iClient], "TakeCover") != 0)
+			if (strcmp(g_sBot_MovePos_Name[iClient], "TakeCover") != 0)
 			{
-				TakeCoverFromEntity(iClient, (IsEntityExists(iTankProp) ? iTankProp : iTankTarget), 768.0);
+				TakeCoverFromEntity(iClient, (g_iBot_TankProp[iClient] > 0 ? g_iBot_TankProp[iClient] : iTankTarget), 768.0);
 			}
 		}
 		else
@@ -1832,22 +2398,28 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 			}
 		}
 
-		if (g_bCvar_TankRock_ShootEnabled && g_iCvar_TankRockHealth > 0 && IsEntityExists(iTankRock))
+		if (g_bCvar_TankRock_ShootEnabled && g_iCvar_TankRockHealth > 0 && g_iBot_TankRock[iClient])
 		{
-			float fRockPos[3]; GetEntityCenteroid(iTankRock, fRockPos);
+			static float fRockPos[3];
+			GetEntityCenteroid(g_iBot_TankRock[iClient], fRockPos);
 
-			if (GetVectorDistance(g_fClientEyePos[iClient], fRockPos, true) <= g_fCvar_TankRock_ShootRange && SurvivorBot_AbleToShootWeapon(iClient) && 
-				(iCurWeapon != iWpnSlots[1] || !SurvivorHasMeleeWeapon(iClient)) && !IsSurvivorBusy(iClient) && HasVisualContactWithEntity(iClient, iTankRock, false, fRockPos))
+			if (GetVectorDistance(g_fClientEyePos[iClient], fRockPos, true) <= g_fCvar_TankRock_ShootRange_Sqr && SurvivorBot_AbleToShootWeapon(iClient) && 
+				(iCurWeapon != iWpnSlots[1] || !SurvivorHasMeleeWeapon(iClient)) && !IsSurvivorBusy(iClient) && HasVisualContactWithEntity(iClient, g_iBot_TankRock[iClient], false, fRockPos))
 			{
 				SnapViewToPosition(iClient, fRockPos);
-				PressAttackButton(iClient, iButtons);
+				PressAttackButton(iClient, iButtons); // shoot tank rock
 			}
 		}
 	}
-
-	int iWitchTarget = g_iSurvivorBot_WitchTarget[iClient];
-	if (IsEntityExists(iWitchTarget) && GetEntityHealth(iWitchTarget) > 0)
+	else
 	{
+		iTankTarget = g_iBot_TankTarget[iClient] = 0;
+	}
+
+	int iWitchTarget = g_iBot_WitchTarget[iClient];
+	if (L4D_IsValidEnt(iWitchTarget) && GetEntityHealth(iWitchTarget) > 0)
+	{
+		float fRage = (GetEntPropFloat(iWitchTarget, Prop_Send, "m_rage") + GetEntPropFloat(iWitchTarget, Prop_Send, "m_wanderrage"));
 		float fWitchOrigin[3]; GetEntityAbsOrigin(iWitchTarget, fWitchOrigin);
 		float fWitchDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fWitchOrigin, true);
 
@@ -1855,8 +2427,7 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 		GetTargetAimPart(iClient, iWitchTarget, fFirePos);
 
 		int iHasShotgun = SurvivorHasShotgun(iClient);
-
-		if (IsValidClient(iWitchHarasser))
+		if (fRage >= 1.0)
 		{
 			if ((iCurWeapon == iWpnSlots[0] || iCurWeapon == iWpnSlots[1]) && SurvivorBot_AbleToShootWeapon(iClient))
 			{
@@ -1873,614 +2444,612 @@ void SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6])
 				if (fWitchDist <= (fShootRange*fShootRange) && bWitchVisible)
 				{
 					SnapViewToPosition(iClient, fFirePos);				
-					bool bFired = PressAttackButton(iClient, iButtons);
-					if (iHasShotgun == 1 && bFired)g_bSurvivorBot_ForceBash[iClient] = true;
+					bool bFired = PressAttackButton(iClient, iButtons); // shoot witch
+					if (iHasShotgun == 1 && bFired)g_bBot_ForceBash[iClient] = true;
 
 					if (fShootRange != g_fCvar_TargetSelection_ShootRange2 && fShootRange != g_fCvar_ImprovedMelee_AttackRange)
 					{
 						ClearMoveToPosition(iClient, "GoToWitch");
 					}
 				}
-				else if (iWitchHarasser != iClient && fWitchDist <= 4000000.0)
+				else if (iWitchHarasser != iClient && fWitchDist <= 4000000.0) // 2000
 				{
-					SetMoveToPosition(iClient, fWitchOrigin, 3, "GoToWitch", 0.0, ((bWitchVisible && !L4D_IsPlayerIncapacitated(iWitchHarasser)) ? (fShootRange > 192.0 ? 192.0 : fShootRange) : 0.0), true);
+					SetMoveToPosition(iClient, fWitchOrigin, 3, "GoToWitch", 0.0, (( bWitchVisible && (iWitchHarasser == -1 || !L4D_IsPlayerIncapacitated(iWitchHarasser)) ) ? (fShootRange > 192.0 ? 192.0 : fShootRange) : 0.0), true);
 				}
 			}
 
-			if (iWitchHarasser == iClient && fWitchDist <= 1048576.0 && !L4D_IsPlayerIncapacitated(iClient))
-			{
+			if (iWitchHarasser == iClient && fWitchDist <= 1048576.0 && !L4D_IsPlayerIncapacitated(iClient)) // 1024
 				L4D2_CommandABot(iClient, iWitchTarget, BOT_CMD_RETREAT);
-			}
 		}
 		else 
 		{
 			float fWalkDist = g_fCvar_WitchBehavior_WalkWhenNearby;
-			if (fWalkDist != 0.0 && fWitchDist <= (fWalkDist*fWalkDist) && (GetEntPropFloat(iWitchTarget, Prop_Send, "m_rage") <= 0.2 && GetEntPropFloat(iWitchTarget, Prop_Send, "m_wanderrage") <= 0.66) && !LBI_IsSurvivorInCombat(iClient))
-			{
+			if (fWalkDist != 0.0 && fWitchDist <= (fWalkDist * fWalkDist) && fRage <= 0.33 && !LBI_IsSurvivorInCombat(iClient))
 				iButtons |= IN_SPEED;
-			}
 
 			int iCrowning = g_iCvar_WitchBehavior_AllowCrowning;
-			if ((iCrowning == 2 || iCrowning == 1 && !bTeamHasHumanPlayer) && iCurWeapon == iWpnSlots[0] && fWitchDist <= 1048576.0 && !L4D_IsPlayerOnThirdStrike(iClient) && (!IsValidClient(iTeamLeader) || fWitchDist <= 262144.0) && !IsWeaponReloading(iCurWeapon, false) && iHasShotgun && IsVisibleEntity(iClient, iWitchTarget))
+			if ((iCrowning == 2 || iCrowning == 1 && !g_bTeamHasHumanPlayer) && iCurWeapon == iWpnSlots[0] && fWitchDist <= 1048576.0 && !L4D_IsPlayerOnThirdStrike(iClient) && (!IsValidClient(iTeamLeader) || fWitchDist <= 262144.0) && !IsWeaponReloading(iCurWeapon, false) && iHasShotgun && IsVisibleEntity(iClient, iWitchTarget)) // 1024 & 512
 			{
-				if (fWitchDist <= 4096.0)
+				if (fWitchDist <= 16777216.0) // 4096
 				{
 					ClearMoveToPosition(iClient, "GoToWitch");
 					SnapViewToPosition(iClient, fFirePos);
-					bool bFired = PressAttackButton(iClient, iButtons);
-					if (iHasShotgun == 1 && bFired)g_bSurvivorBot_ForceBash[iClient] = true;
+
+					bool bFired = PressAttackButton(iClient, iButtons); // shoot witch
+					if (iHasShotgun == 1 && bFired)
+						g_bBot_ForceBash[iClient] = true;
 				}
 				else if (LBI_IsSurvivorBotAvailable(iClient))
 				{
-					bool bApproachWitch = !ShouldUseFlowDistance();
+					bool bApproachWitch = !bShouldUseFlow;
 					if (!bApproachWitch)
 					{
 						Address pArea = L4D2Direct_GetTerrorNavArea(fWitchOrigin);
 						bApproachWitch = (pArea != Address_Null && L4D2Direct_GetTerrorNavAreaFlow(pArea) >= L4D2Direct_GetFlowDistance(iClient));
 					}
-					if (bApproachWitch)SetMoveToPosition(iClient, fWitchOrigin, 2, "GoToWitch", 0.0, 0.0, true);
+					if (bApproachWitch)
+						SetMoveToPosition(iClient, fWitchOrigin, 2, "GoToWitch", 0.0, 0.0, true);
 
-					if (fWitchDist <= 16384.0)
-					{
+					if (fWitchDist <= 16384.0) // 128
 						SnapViewToPosition(iClient, fFirePos);
-					}
 				}
 			}
 		}
 	}
 
-	float fInfectedDist = -1.0;
-	if (IsEntityExists(iInfectedTarget))
+	int iInfectedTarg = g_iBot_TargetInfected[iClient];
+	bool bIsTargetPlayer = (1 <= iInfectedTarg <= MaxClients);
+	if (L4D_IsValidEnt(iInfectedTarg) && (!bIsTargetPlayer || IsValidClient(iInfectedTarg) && IsPlayerAlive(iInfectedTarg)))
 	{
-		float fInfectedPos[3]; GetEntityCenteroid(iInfectedTarget, fInfectedPos);
-		float fInfectedOrigin[3]; GetEntityAbsOrigin(iInfectedTarget, fInfectedOrigin);
-		fInfectedDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fInfectedOrigin, true);
-		
-		L4D2ZombieClassType iInfectedClass = L4D2ZombieClass_NotInfected;
-		if (IsValidClient(iInfectedTarget))iInfectedClass = L4D2_GetPlayerZombieClass(iInfectedTarget);
+		static float fTargetPos[3]; GetEntityCenteroid(iInfectedTarg, fTargetPos);
+		static float fInfectedOrigin[3]; GetEntityAbsOrigin(iInfectedTarg, fInfectedOrigin);
+		fTargetDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fInfectedOrigin, true);
 
-		if (g_bCvar_ImprovedMelee_Enabled)
+		L4D2ZombieClassType iInfectedClass;
+		if (bIsTargetPlayer)
+			iInfectedClass = L4D2_GetPlayerZombieClass(iInfectedTarg);
+
+		int iMeleeType = SurvivorHasMeleeWeapon(iClient);
+		if (g_bCvar_ImprovedMelee_Enabled && iMeleeType != 0)
 		{
-			int iMeleeType = SurvivorHasMeleeWeapon(iClient);
-			if (iMeleeType != 0)
+			if (iCurWeapon == iWpnSlots[1])
 			{
-				if (iCurWeapon == iWpnSlots[1])
+				static float fAimPosition[3];
+				GetClosestToEyePosEntityBonePos(iClient, iInfectedTarg, fAimPosition);
+
+				float fMeleeDistance = GetVectorDistance(g_fClientEyePos[iClient], fAimPosition, true);
+				if (fMeleeDistance <= g_fCvar_ImprovedMelee_AimRange_Sqr)
 				{
-					float fAimPosition[3]; GetClosestToEyePosEntityBonePos(iClient, iInfectedTarget, fAimPosition);
-					float fMeleeDistance = GetVectorDistance(g_fClientEyePos[iClient], fAimPosition, true);
-					
-					if (fMeleeDistance <= g_fCvar_ImprovedMelee_AimRange)
-					{
-						g_fSurvivorBot_BlockWeaponSwitchTime[iClient] = (GetGameTime() + (iMeleeType == 2 ? 3.0 : 1.0));
-						SnapViewToPosition(iClient, fAimPosition);
-					}
-
-					if (!g_bSurvivorBot_PreventFire[iClient] && fMeleeDistance <= (g_fCvar_ImprovedMelee_AttackRange*g_fCvar_ImprovedMelee_AttackRange) && (iGameDifficulty == 4 || (!IsSurvivorBusy(iClient) || g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iSurvivorBot_NearbyFriends[iClient]) / (iTeamCount - 1))))))
-					{
-						float fAttackTime = (iMeleeType == 2 ? GetRandomFloat(0.33, 0.8) : GetRandomFloat(0.1, 0.33));
-						g_fSurvivorBot_MeleeAttackTime[iClient] = (GetGameTime() + fAttackTime);
-					}
-
-					if (GetGameTime() < g_fSurvivorBot_MeleeAttackTime[iClient])
-					{
-						bool bShouldShove = (iInfectedClass != L4D2ZombieClass_Charger && GetRandomInt(1, (iMeleeType == 2 ? 200 : g_iCvar_ImprovedMelee_ShoveChance)) == 1 && (!g_bExtensionActions || iInfectedClass != L4D2ZombieClass_NotInfected || !IsCommonInfectedStumbled(iInfectedTarget)));
-						iButtons |= ( bShouldShove ? IN_ATTACK2 : IN_ATTACK );
-					}
-
-					bool bStopApproaching = true;
-					if (g_fCvar_ImprovedMelee_ApproachRange > 0.0 && GetGameTime() > g_fSurvivorBot_MeleeApproachTime[iClient] && !IsSurvivorBotBlindedByVomit(iClient) && !IsValidClient(iPinnedFriend) && (!IsValidClient(iTankTarget) || GetClientDistance(iClient, iTankTarget, true) > 1048576.0) && LBI_IsReachableEntity(iClient, iInfectedTarget) 
-						&& !IsFinaleEscapeVehicleArrived() && (iInfectedClass == L4D2ZombieClass_NotInfected || (L4D_IsPlayerStaggering(iInfectedTarget) || L4D_GetPinnedSurvivor(iInfectedTarget) != 0) && !L4D_IsAnySurvivorInCheckpoint())
-					)
-					{
-						Address pArea;
-						float fMovePos[3]; GetEntityAbsOrigin(iInfectedTarget, fMovePos);
-						if (!ShouldUseFlowDistance() || (pArea = L4D2Direct_GetTerrorNavArea(fMovePos)) == Address_Null || L4D2Direct_GetTerrorNavAreaFlow(pArea) >= (L4D2Direct_GetFlowDistance(iClient) - SquareRoot(g_fCvar_ImprovedMelee_ApproachRange*0.5)))
-						{
-							float fLeaderDist = ((iInfectedClass == L4D2ZombieClass_NotInfected && iTeamLeader != iClient && IsValidClient(iTeamLeader)) ? GetClientTravelDistance(iTeamLeader, fMovePos, true) : -2.0);
-							if (fLeaderDist == -2.0 || fLeaderDist != -1.0 && fLeaderDist <= (g_fCvar_ImprovedMelee_ApproachRange * 0.75))
-							{
-								float fTravelDist = GetVectorTravelDistance(fMovePos, g_fClientAbsOrigin[iClient], true);
-								if (fTravelDist != -1.0 && fTravelDist <= g_fCvar_ImprovedMelee_ApproachRange)
-								{
-									SetMoveToPosition(iClient, fMovePos, 2, "ApproachMelee");
-									bStopApproaching = false;
-								}
-							}
-						}
-					}
-					if (bStopApproaching)ClearMoveToPosition(iClient, "ApproachMelee");
+					g_fBot_BlockWeaponSwitchTime[iClient] = (fCurTime + (iMeleeType == 2 ? 5.0 : 2.0));
+					SnapViewToPosition(iClient, fAimPosition);
 				}
-				else if (iCurWeapon == iWpnSlots[0])
+
+				if (!g_bBot_PreventFire[iClient] && fMeleeDistance <= g_fCvar_ImprovedMelee_AttackRange_Sqr && (iGameDifficulty == 4 || (!IsSurvivorBusy(iClient)
+					|| g_iBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iBot_NearbyFriends[iClient]) / (iTeamCount - 1))))))
 				{
-					int iMeleeSwitchCount = ((iMeleeType != 2) ? g_iCvar_ImprovedMelee_SwitchCount : g_iCvar_ImprovedMelee_SwitchCount2);
-					float fMeleeSwitchRange = (g_fCvar_ImprovedMelee_SwitchRange * ((iMeleeType == 2) ? 1.5 : (SurvivorHasShotgun(iClient) ? 0.66 : 1.0)));
-					if (fInfectedDist <= fMeleeSwitchRange && !IsValidClient(iTankTarget) && (!SurvivorHasShotgun(iClient) || GetWeaponClip1(iCurWeapon) <= 0))
-					{ 
-						if (iInfectedClass != L4D2ZombieClass_NotInfected)
+					float fAttackTime = (iMeleeType == 2 ? GetRandomFloat(0.33, 0.8) : GetRandomFloat(0.1, 0.33));
+					g_fBot_MeleeAttackTime[iClient] = (fCurTime + fAttackTime);
+				}
+
+				if (fCurTime < g_fBot_MeleeAttackTime[iClient])
+				{
+					bool bShouldShove = (iInfectedClass != L4D2ZombieClass_Charger && GetRandomInt(1, (iMeleeType == 2 ? 200 : g_iCvar_ImprovedMelee_ShoveChance)) == 1
+						&& (bIsTargetPlayer && !L4D_IsPlayerStaggering(iInfectedTarg) || !IsCommonStumbling(iInfectedTarg))
+						&& L4D_GetPlayerShovePenalty(iClient) < (g_iCvar_ShovePenaltyMin - 1));
+					iButtons |= ( bShouldShove ? IN_ATTACK2 : IN_ATTACK );
+				}
+
+				bool bStopApproaching = true;
+				if (g_fCvar_ImprovedMelee_ApproachRange > 0.0 && fCurTime > g_fBot_MeleeApproachTime[iClient] && !IsSurvivorBotBlindedByVomit(iClient) && !iPinnedFriend
+					&& (!iTankTarget || GetClientDistance(iClient, iTankTarget, true) > 1048576.0) && LBI_IsReachableEntity(iClient, iInfectedTarg) && !IsFinaleEscapeVehicleArrived()
+					&& (!bIsTargetPlayer || (L4D_IsPlayerStaggering(iInfectedTarg) || L4D_GetPinnedSurvivor(iInfectedTarg) != 0) && !L4D_IsAnySurvivorInCheckpoint()))
+				{
+					static float fMovePos[3];
+					GetEntityAbsOrigin(iInfectedTarg, fMovePos);
+
+					Address pArea;
+					if (!bShouldUseFlow || (pArea = L4D2Direct_GetTerrorNavArea(fMovePos)) == Address_Null || L4D2Direct_GetTerrorNavAreaFlow(pArea) >= (L4D2Direct_GetFlowDistance(iClient) - SquareRoot(g_fCvar_ImprovedMelee_ApproachRange*0.5)))
+					{
+						fLeaderDist = ((!bIsTargetPlayer && iTeamLeader != iClient && IsValidClient(iTeamLeader)) ? GetClientTravelDistance(iTeamLeader, fMovePos, true) : -2.0);
+						if (fLeaderDist == -2.0 || fLeaderDist != -1.0 && fLeaderDist <= (g_fCvar_ImprovedMelee_ApproachRange * 0.75))
 						{
-							if (g_iInfectedBot_CurrentVictim[iInfectedTarget] != iClient || L4D_GetPinnedSurvivor(iInfectedTarget) != 0 || L4D_IsPlayerStaggering(iInfectedTarget))
+							float fTravelDist = GetNavDistance(fMovePos, g_fClientAbsOrigin[iClient], iInfectedTarg);
+							if (fTravelDist != -1.0 && fTravelDist <= g_fCvar_ImprovedMelee_ApproachRange)
 							{
-								SwitchWeaponSlot(iClient, 1);
-								g_fSurvivorBot_MeleeApproachTime[iClient] = GetGameTime() + ((iMeleeType == 2) ? 2.0 : 0.1);
+								SetMoveToPosition(iClient, fMovePos, 2, "ApproachMelee");
+								bStopApproaching = false;
 							}
 						}
-						else if (g_iSurvivorBot_NearbyInfectedCount[iClient] >= iMeleeSwitchCount && !IsValidClient(iPinnedFriend) && (GetCurrentGameDifficulty() == 4 || !IsSurvivorBusy(iClient) || g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.75)))
+					}
+				}
+				if (bStopApproaching)ClearMoveToPosition(iClient, "ApproachMelee");
+			}
+			else if (iCurWeapon == iWpnSlots[0])
+			{
+				int iMeleeSwitchCount = ((iMeleeType != 2) ? g_iCvar_ImprovedMelee_SwitchCount : g_iCvar_ImprovedMelee_SwitchCount2);
+				float fMeleeSwitchRange = (g_fCvar_ImprovedMelee_SwitchRange * ((iMeleeType == 2) ? 1.5 : (iInvFlags & FLAG_SHOTGUN ? 0.66 : 1.0)));
+
+				if (fTargetDist <= fMeleeSwitchRange && !iTankTarget && ( ~iInvFlags & FLAG_SHOTGUN || GetWeaponClip1(iCurWeapon) <= 0 ))
+				{ 
+					if (bIsTargetPlayer)
+					{
+						if (g_iInfectedBot_CurrentVictim[iInfectedTarg] != iClient || L4D_GetPinnedSurvivor(iInfectedTarg) != 0 || L4D_IsPlayerStaggering(iInfectedTarg))
 						{
 							SwitchWeaponSlot(iClient, 1);
-							g_fSurvivorBot_MeleeApproachTime[iClient] = GetGameTime() + ((iMeleeType == 2) ? 2.0 : 0.66);
+							g_fBot_MeleeApproachTime[iClient] = fCurTime + ((iMeleeType == 2) ? 2.0 : 0.1);
 						}
+					}
+					else if (g_iBot_NearbyInfectedCount[iClient] >= iMeleeSwitchCount && !iPinnedFriend &&
+						(GetCurrentGameDifficulty() == 4 || !IsSurvivorBusy(iClient) || g_iBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.75)))
+					{
+						SwitchWeaponSlot(iClient, 1);
+						g_fBot_MeleeApproachTime[iClient] = fCurTime + ((iMeleeType == 2) ? 2.0 : 0.66);
 					}
 				}
 			}
 		}
 
-		if ((g_iCvar_AutoShove_Enabled == 1 || g_iCvar_AutoShove_Enabled == 2 && !FVectorInViewAngle(iClient, fInfectedPos)) && fInfectedDist <= 6400.0 && !L4D_IsPlayerIncapacitated(iClient) && (!IsSurvivorBusy(iClient) || g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iSurvivorBot_NearbyFriends[iClient]) / (iTeamCount - 1)))) && (!SurvivorHasMeleeWeapon(iClient) || iCurWeapon != iWpnSlots[1]))
+		if ((g_iCvar_AutoShove_Enabled == 1 || g_iCvar_AutoShove_Enabled == 2 && !FVectorInViewAngle(iClient, fTargetPos)) && fTargetDist <= 6400.0 && !L4D_IsPlayerIncapacitated(iClient)
+			&& (!IsSurvivorBusy(iClient) || g_iBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, (float(g_iBot_NearbyFriends[iClient]) / (iTeamCount - 1))))
+			&& (~iInvFlags & FLAG_MELEE || iCurWeapon != iWpnSlots[1]))
 		{
-			if (IsSurvivorCarryingProp(iClient) || (iInfectedClass == L4D2ZombieClass_NotInfected || iInfectedClass != L4D2ZombieClass_Charger && iInfectedClass != L4D2ZombieClass_Tank && !L4D_IsPlayerStaggering(iInfectedTarget) && !IsUsingSpecialAbility(iInfectedTarget)) && GetRandomInt(1, 4) == 1)
+			if (IsSurvivorCarryingProp(iClient) || (!bIsTargetPlayer || 
+				iInfectedClass != L4D2ZombieClass_Charger && iInfectedClass != L4D2ZombieClass_Tank && 
+				!L4D_IsPlayerStaggering(iInfectedTarg) && !IsUsingSpecialAbility(iInfectedTarg)) && 
+				GetRandomInt(1, 4) == 1 && L4D_GetPlayerShovePenalty(iClient) < (g_iCvar_ShovePenaltyMin - 1)
+			)
 			{
-				SnapViewToPosition(iClient, fInfectedPos);				
+				SnapViewToPosition(iClient, fTargetPos);
 				iButtons |= IN_ATTACK2;
 			}
 			else if (SurvivorBot_AbleToShootWeapon(iClient))
 			{
-				SnapViewToPosition(iClient, fInfectedPos);				
+				SnapViewToPosition(iClient, fTargetPos);
 				PressAttackButton(iClient, iButtons);
 			}
 		}
 	}
-
-	if (g_bCvar_TargetSelection_Enabled && !IsValidClient(iPinnedFriend) && !IsSurvivorBusy(iClient) && (IsValidClient(iTankTarget) || IsEntityExists(iInfectedTarget)))
+	else
 	{
-		int iFireTarget = iInfectedTarget;
-		if (IsEntityExists(iFireTarget))
+		iInfectedTarg = g_iBot_TargetInfected[iClient] = 0;
+		bIsTargetPlayer = false;
+	}
+
+	if (iInfectedTarg || iTankTarget)
+	{
+		if (g_bCvar_TargetSelection_Enabled && !iPinnedFriend && !IsSurvivorBusy(iClient))
 		{
-			if (g_bCvar_TargetSelection_IgnoreDociles && !IsValidClient(iFireTarget) && !IsCommonInfectedAttacking(iFireTarget))
+			int iFireTarget = iInfectedTarg;
+			if (iFireTarget)
 			{
-				iFireTarget = -1;
+				if (g_bCvar_TargetSelection_IgnoreDociles && !bIsTargetPlayer && !IsCommonAttacking(iFireTarget))
+					iFireTarget = 0;
+
+				if (iTankTarget && (fTargetDist > 1048576.0 || GetClientDistance(iClient, iTankTarget, true) < fTargetDist)) // 1024
+					iFireTarget = iTankTarget;
 			}
-			if (IsValidClient(iTankTarget) && (fInfectedDist > 1048576.0 || GetClientDistance(iClient, iTankTarget, true) < fInfectedDist))
+			else if (iTankTarget)
 			{
 				iFireTarget = iTankTarget;
 			}
-		}
-		else if (IsValidClient(iTankTarget))
-		{
-			iFireTarget = iTankTarget;
-		}
 
-		if (IsEntityExists(iFireTarget) && HasVisualContactWithEntity(iClient, iFireTarget, (iFireTarget != iTankTarget)))
-		{
-			L4D2ZombieClassType iInfectedClass = L4D2ZombieClass_NotInfected;
-			if (IsValidClient(iFireTarget))iInfectedClass = L4D2_GetPlayerZombieClass(iFireTarget);
-
-			float fFirePos[3]; GetTargetAimPart(iClient, iFireTarget, fFirePos);
-			float fTargetDist = GetVectorDistance(g_fClientEyePos[iClient], fFirePos, true);
-
-			if (iInfectedClass != L4D2ZombieClass_Boomer || !bFriendIsNearBoomer && fTargetDist > BOT_BOOMER_AVOID_RADIUS_SQR)
+			if (iFireTarget && HasVisualContactWithEntity(iClient, iFireTarget, (iFireTarget != iTankTarget)))
 			{
-				if (iCurWeapon == iWpnSlots[0])
+				L4D2ZombieClassType iInfectedClass;
+				if (iFireTarget == iInfectedTarg && bIsTargetPlayer)
+					iInfectedClass = L4D2_GetPlayerZombieClass(iFireTarget);
+
+				float fFirePos[3]; GetTargetAimPart(iClient, iFireTarget, fFirePos);
+				fTargetDist = GetVectorDistance(g_fClientEyePos[iClient], fFirePos, true);
+
+				if (iInfectedClass != L4D2ZombieClass_Boomer || !g_bBot_IsFriendNearBoomer[iClient] && fTargetDist > BOT_BOOMER_AVOID_RADIUS_SQR)
 				{
-					float fShootRange = g_fCvar_TargetSelection_ShootRange;
-					if (SurvivorHasShotgun(iClient))
+					if (iCurWeapon == iWpnSlots[0])
 					{
-						fShootRange = g_fCvar_TargetSelection_ShootRange2;
-						if (fTargetDist <= (g_fCvar_TargetSelection_ShootRange4*g_fCvar_TargetSelection_ShootRange4) && fTargetDist > ((fShootRange * 1.1)*(fShootRange * 1.1)) && GetGameTime() > g_fSurvivorBot_NextWeaponRangeSwitchTime[iClient] && !IsWeaponReloading(iCurWeapon, false) && !SurvivorHasMeleeWeapon(iClient))
+						float fShootRange = g_fCvar_TargetSelection_ShootRange;
+						if (SurvivorHasShotgun(iClient))
 						{
-							g_fSurvivorBot_NextWeaponRangeSwitchTime[iClient] = GetGameTime() + GetRandomFloat(1.0, 3.0);
-							g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-							SwitchWeaponSlot(iClient, 1);
+							fShootRange = g_fCvar_TargetSelection_ShootRange2;
+							if (fTargetDist <= (g_fCvar_TargetSelection_ShootRange4*g_fCvar_TargetSelection_ShootRange4) && fTargetDist > ((fShootRange * 1.1)*(fShootRange * 1.1))
+								&& fCurTime > g_fBot_NextWeaponRangeSwitchTime[iClient] && !IsWeaponReloading(iCurWeapon, false) && ~iInvFlags & FLAG_MELEE )
+							{
+								g_fBot_NextWeaponRangeSwitchTime[iClient] = fCurTime + GetRandomFloat(1.0, 3.0);
+								g_bBot_ForceSwitchWeapon[iClient] = true;
+								SwitchWeaponSlot(iClient, 1);
+							}
+						}
+						else if (iInvFlags & FLAG_SNIPER)
+						{
+							fShootRange = g_fCvar_TargetSelection_ShootRange3;
+						}
+
+						if (fTargetDist <= (fShootRange*fShootRange) && SurvivorBot_AbleToShootWeapon(iClient))
+						{
+							SnapViewToPosition(iClient, fFirePos);
+							PressAttackButton(iClient, iButtons);
 						}
 					}
-					else if (SurvivorHasSniperRifle(iClient))
+					else if (iCurWeapon == iWpnSlots[1] && ~iInvFlags & FLAG_MELEE)
 					{
-						fShootRange = g_fCvar_TargetSelection_ShootRange3;
-					}
+						float fShotgunRange = (g_fCvar_TargetSelection_ShootRange2 * 0.75);
+						if (fTargetDist <= (fShotgunRange*fShotgunRange) && fCurTime > g_fBot_NextWeaponRangeSwitchTime[iClient]
+							&& GetClientPrimaryAmmo(iClient) > 0 && !IsWeaponReloading(iCurWeapon) && iInvFlags & FLAG_SHOTGUN)
+						{
+							g_fBot_NextWeaponRangeSwitchTime[iClient] = fCurTime + GetRandomFloat(1.0, 3.0);
+							g_bBot_ForceSwitchWeapon[iClient] = true;
+							SwitchWeaponSlot(iClient, 0);
+						}
 
-					if (fTargetDist <= (fShootRange*fShootRange) && SurvivorBot_AbleToShootWeapon(iClient))
-					{
-						SnapViewToPosition(iClient, fFirePos);
-						PressAttackButton(iClient, iButtons);
+						if (L4D_IsPlayerIncapacitated(iClient) || fTargetDist <= (g_fCvar_TargetSelection_ShootRange4*g_fCvar_TargetSelection_ShootRange4) && SurvivorBot_AbleToShootWeapon(iClient))
+						{
+							SnapViewToPosition(iClient, fFirePos);
+							PressAttackButton(iClient, iButtons);
+						}
 					}
 				}
-				else if (iCurWeapon == iWpnSlots[1] && !SurvivorHasMeleeWeapon(iClient))
-				{
-					float fShotgunRange = (g_fCvar_TargetSelection_ShootRange2 * 0.75);
-					if (fTargetDist <= (fShotgunRange*fShotgunRange) && GetGameTime() > g_fSurvivorBot_NextWeaponRangeSwitchTime[iClient] && GetClientPrimaryAmmo(iClient) > 0 && !IsWeaponReloading(iCurWeapon) && SurvivorHasShotgun(iClient))
-					{
-						g_fSurvivorBot_NextWeaponRangeSwitchTime[iClient] = GetGameTime() + GetRandomFloat(1.0, 3.0);
-						g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-						SwitchWeaponSlot(iClient, 0);
-					}
+			}
+		}
 
-					if (L4D_IsPlayerIncapacitated(iClient) || fTargetDist <= (g_fCvar_TargetSelection_ShootRange4*g_fCvar_TargetSelection_ShootRange4) && SurvivorBot_AbleToShootWeapon(iClient))
+		if (g_bCvar_GrenadeThrow_Enabled && iWpnSlots[2])
+		{
+			float fThrowPosition[3];
+			int iThrowTarget, iGrenadeType = SurvivorHasGrenade(iClient);
+			bool bTargetIsTank;
+
+			if ((iGrenadeType != 1 || g_bCvar_Nightmare) && iTankTarget && !L4D_IsPlayerIncapacitated(iTankTarget) && 
+				GetEntityHealth(iTankTarget) > RoundFloat(GetEntityMaxHealth(iTankTarget) * 0.33) && 
+				GetClientDistance(iClient, iTankTarget, true) <= g_fCvar_GrenadeThrow_ThrowRange_Sqr)
+			{
+				iThrowTarget = iTankTarget;
+				bTargetIsTank = true;
+				GetEntityAbsOrigin(iTankTarget, fThrowPosition);
+			}
+			else
+			{
+				int iPossibleTarget = ((iGrenadeType != 2 && !g_bCvar_Nightmare) ? GetFarthestInfected(iClient, g_fCvar_GrenadeThrow_ThrowRange) : iInfectedTarg);
+				if (!iPossibleTarget && g_bCvar_Nightmare)
+				{
+					iPossibleTarget = iWitchTarget;
+					bTargetIsTank = true;
+				}
+
+				if (iPossibleTarget)
+				{
+					iThrowTarget = iPossibleTarget;
+					GetEntityAbsOrigin(iPossibleTarget, fThrowPosition);
+				}
+			}
+			g_iBot_Grenade_ThrowTarget[iClient] = iThrowTarget;
+
+			if (iThrowTarget)
+			{
+				if (g_bCvar_Nightmare || iGrenadeType == 2)
+				{
+					float fThrowAngles[3], fTargetForward[3], fMidPos[3];
+					MakeVectorFromPoints(fThrowPosition, g_fClientEyePos[iClient], fThrowAngles);
+					NormalizeVector(fThrowAngles, fThrowAngles);
+					GetVectorAngles(fThrowAngles, fThrowAngles);
+
+					GetAngleVectors(fThrowAngles, fTargetForward, NULL_VECTOR, NULL_VECTOR);
+					NormalizeVector(fTargetForward, fTargetForward);
+
+					float fThrowDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fThrowPosition);
+					fMidPos[0] = fThrowPosition[0] + (fTargetForward[0] * (fThrowDist * 0.5));
+					fMidPos[1] = fThrowPosition[1] + (fTargetForward[1] * (fThrowDist * 0.5));
+					fMidPos[2] = fThrowPosition[2] + (fTargetForward[2] * (fThrowDist * 0.5));
+
+					if (GetVectorDistance(g_fClientAbsOrigin[iClient], fMidPos, true) > BOT_GRENADE_CHECK_RADIUS_SQR)
 					{
-						SnapViewToPosition(iClient, fFirePos);
-						PressAttackButton(iClient, iButtons);
+						float fTraceStart[3]; fTraceStart = fMidPos; fTraceStart[2] + HUMAN_HALF_HEIGHT;
+						float fAngleDown[3] = {90.0, 0.0, 0.0};
+						Handle hGroundCheck = TR_TraceRayFilterEx(fTraceStart, fAngleDown, MASK_PLAYERSOLID, RayType_Infinite, Base_TraceFilter);
+						float fTrHitPos[3]; TR_GetEndPosition(fTrHitPos, hGroundCheck); delete hGroundCheck;
+
+						float fHeightDiff = FloatAbs(fTrHitPos[2] - fThrowPosition[2]);
+						if (fHeightDiff < 96.0)
+						{
+							fThrowPosition = fMidPos;
+						}
 					}
+				}
+
+				if (iCurWeapon == iWpnSlots[2])
+				{
+					int iThrowArea = L4D_GetNearestNavArea(fThrowPosition, _, true, false, _, 3);
+					if (iThrowArea)
+						LBI_GetClosestPointOnNavArea(iThrowArea, fThrowPosition, fThrowPosition);
+
+					static float fThrowVel[3];
+					CalculateTrajectory(g_fClientEyePos[iClient], fThrowPosition, 700.0, 0.4, fThrowVel);
+					AddVectors(g_fClientEyePos[iClient], fThrowVel, g_fBot_Grenade_AimPos[iClient]);
+
+					static float fThrowTrajectory[3];
+					fThrowTrajectory = fThrowPosition;
+					fThrowTrajectory[2] += (g_fBot_Grenade_AimPos[iClient][2] - g_fClientEyePos[iClient][2]);
+
+					Handle hCeilingCheck = TR_TraceRayFilterEx(g_fClientEyePos[iClient], fThrowTrajectory, MASK_SOLID, RayType_EndPoint, Base_TraceFilter);
+					g_fBot_Grenade_AimPos[iClient][2] *= TR_GetFraction(hCeilingCheck);
+					delete hCeilingCheck;
+
+					g_fBot_Grenade_ThrowPos[iClient] = fThrowPosition;
+					if (g_iBot_ThreatInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.33) && 
+						CheckIsUnableToThrowGrenade(
+							iClient, 
+							iThrowTarget, 
+							iGrenadeType, 
+							fThrowPosition, 
+							bTargetIsTank)
+						)
+					{
+						g_bBot_ForceSwitchWeapon[iClient] = true;
+						SwitchWeaponSlot(iClient, ((GetClientPrimaryAmmo(iClient) > 0) ? 0 : 1));
+
+						if (iGrenadeType == 2)
+						{
+							if (fCurTime > g_fBot_Grenade_NextThrowTime_Molotov)
+							{
+								g_fBot_Grenade_NextThrowTime_Molotov = (fCurTime + GetRandomFloat(4.0, 7.5));
+							}
+						}
+						else if (fCurTime > g_fBot_Grenade_NextThrowTime)
+						{
+							g_fBot_Grenade_NextThrowTime = (fCurTime + GetRandomFloat(2.5, 4.0));
+						}
+					}
+					else
+					{
+						SnapViewToPosition(iClient, g_fBot_Grenade_AimPos[iClient]);
+						PressAttackButton(iClient, iButtons); //throw grenade
+					}
+				}
+				else if (CheckCanThrowGrenade(
+					iClient, 
+					iThrowTarget, 
+					iGrenadeType, 
+					fThrowPosition, 
+					bTargetIsTank)
+				)
+				{
+					SwitchWeaponSlot(iClient, 2);
 				}
 			}
 		}
 	}
 
-	if (g_bCvar_GrenadeThrow_Enabled && iWpnSlots[2] != -1 && (IsEntityExists(iInfectedTarget) || IsValidClient(iTankTarget)))
-	{
-		float fThrowPosition[3];
-		int iThrowTarget = -1, iGrenadeType = SurvivorHasGrenade(iClient);
+	if (L4D_IsPlayerIncapacitated(iClient) || L4D_GetPinnedInfected(iClient))
+		return iAliveBots;
 
-		bool bIsThrowTargetTank = false;
-		if (iGrenadeType != 1 && IsValidClient(iTankTarget) && !L4D_IsPlayerIncapacitated(iTankTarget) && (GetEntityHealth(iTankTarget) - 1500) >= RoundFloat((GetEntityMaxHealth(iTankTarget) - 1500) * 0.33) && GetClientDistance(iClient, iTankTarget, true) <= (g_fCvar_GrenadeThrow_ThrowRange*g_fCvar_GrenadeThrow_ThrowRange))
-		{
-			iThrowTarget = iTankTarget;
-			GetEntityAbsOrigin(iTankTarget, fThrowPosition);
-			bIsThrowTargetTank = true;
-		}
-		else
-		{
-			int iPossibleTarget = (iGrenadeType != 2 ? GetFarthestInfected(iClient, g_fCvar_GrenadeThrow_ThrowRange) : iInfectedTarget);
-			if (iPossibleTarget > 0)
-			{
-				iThrowTarget = iPossibleTarget;
-				GetEntityAbsOrigin(iPossibleTarget, fThrowPosition);
-			}
-		}
-		g_iSurvivorBot_Grenade_ThrowTarget[iClient] = iThrowTarget;
-
-		if (IsEntityExists(iThrowTarget))
-		{
-			if (iGrenadeType == 2)
-			{
-				float fThrowAngles[3], fTargetForward[3], fMidPos[3];
-				MakeVectorFromPoints(fThrowPosition, g_fClientEyePos[iClient], fThrowAngles);
-				NormalizeVector(fThrowAngles, fThrowAngles);
-				GetVectorAngles(fThrowAngles, fThrowAngles);
-
-				GetAngleVectors(fThrowAngles, fTargetForward, NULL_VECTOR, NULL_VECTOR);
-				NormalizeVector(fTargetForward, fTargetForward);
-
-				float fThrowDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fThrowPosition);
-				fMidPos[0] = fThrowPosition[0] + (fTargetForward[0] * (fThrowDist * 0.5));
-				fMidPos[1] = fThrowPosition[1] + (fTargetForward[1] * (fThrowDist * 0.5));
-				fMidPos[2] = fThrowPosition[2] + (fTargetForward[2] * (fThrowDist * 0.5));
-
-				if (GetVectorDistance(g_fClientAbsOrigin[iClient], fMidPos, true) > BOT_GRENADE_CHECK_RADIUS_SQR)
-				{
-					float fTraceStart[3]; fTraceStart = fMidPos; fTraceStart[2] + HUMAN_HALF_HEIGHT;
-					float fAngleDown[3] = {90.0, 0.0, 0.0};
-					Handle hGroundCheck = TR_TraceRayFilterEx(fTraceStart, fAngleDown, MASK_PLAYERSOLID, RayType_Infinite, Base_TraceFilter);
-					float fTrHitPos[3]; TR_GetEndPosition(fTrHitPos, hGroundCheck); delete hGroundCheck;
-
-					float fHeightDiff = FloatAbs(fTrHitPos[2] - fThrowPosition[2]);
-					if (fHeightDiff < 96.0)
-					{
-						fThrowPosition = fMidPos;
-					}
-				}
-			}
-
-			if (iCurWeapon == iWpnSlots[2])
-			{
-				int iThrowArea = L4D_GetNearestNavArea(fThrowPosition, _, true, false, _, 3);
-				if (iThrowArea)LBI_GetClosestPointOnNavArea(iThrowArea, fThrowPosition, fThrowPosition);
-
-				float fThrowVel[3]; CalculateTrajectory(g_fClientEyePos[iClient], fThrowPosition, 700.0, 0.4, fThrowVel);
-				AddVectors(g_fClientEyePos[iClient], fThrowVel, g_fSurvivorBot_Grenade_AimPos[iClient]);
-
-				float fThrowTrajectory[3];
-				fThrowTrajectory = fThrowPosition;
-				fThrowTrajectory[2] += (g_fSurvivorBot_Grenade_AimPos[iClient][2] - g_fClientEyePos[iClient][2]);
-
-				Handle hCeilingCheck = TR_TraceRayFilterEx(g_fClientEyePos[iClient], fThrowTrajectory, MASK_SOLID, RayType_EndPoint, Base_TraceFilter);
-				g_fSurvivorBot_Grenade_AimPos[iClient][2] *= TR_GetFraction(hCeilingCheck); delete hCeilingCheck;
-
-				g_fSurvivorBot_Grenade_ThrowPos[iClient] = fThrowPosition;
-
-				if (g_iSurvivorBot_ThreatInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.33) && CheckIsUnableToThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
-				{
-					g_bSurvivorBot_ForceSwitchWeapon[iClient] = true;
-					SwitchWeaponSlot(iClient, ((GetClientPrimaryAmmo(iClient) > 0) ? 0 : 1));
-
-					if (iGrenadeType == 2)
-					{
-						if (GetGameTime() > g_fSurvivorBot_Grenade_NextThrowTime_Molotov)
-						{
-							g_fSurvivorBot_Grenade_NextThrowTime_Molotov = GetGameTime() + GetRandomFloat(0.75, 1.5);
-						}
-					}
-					else if (GetGameTime() > g_fSurvivorBot_Grenade_NextThrowTime)
-					{
-						g_fSurvivorBot_Grenade_NextThrowTime = GetGameTime() + GetRandomFloat(0.75, 1.5);
-					}
-				}
-				else
-				{
-					SnapViewToPosition(iClient, g_fSurvivorBot_Grenade_AimPos[iClient]);
-					PressAttackButton(iClient, iButtons);
-				}
-			}
-			else if (CheckCanThrowGrenade(iClient, iThrowTarget, g_fClientAbsOrigin[iClient], fThrowPosition, bFriendIsNearThrowArea, bIsThrowTargetTank))
-			{
-				SwitchWeaponSlot(iClient, 2);
-			}
-		}
-	}
-
-	if (L4D_IsPlayerIncapacitated(iClient))
-		return;
-
-	if (g_bCvar_DeployUpgradePacks && iWpnSlots[0] != -1 && iWpnSlots[3] != -1 && !LBI_IsSurvivorInCombat(iClient) && SurvivorHasHealthKit(iClient) == 3)
+	if (g_bCvar_DeployUpgradePacks && iWpnSlots[0] && iInvFlags & FLAG_UPGRADE && !LBI_IsSurvivorInCombat(iClient))
 	{
 		bool bHasDeployedPackNearby = false;
-		int iActiveDeployers = (GetSurvivorTeamActiveItemCount(L4D2WeaponId_IncendiaryAmmo) + GetSurvivorTeamActiveItemCount(L4D2WeaponId_FragAmmo));
+		int iActiveDeployers = (GetTeamActiveItemCount(L4D2WeaponId_IncendiaryAmmo) + GetTeamActiveItemCount(L4D2WeaponId_FragAmmo));
 		if (g_hDeployedAmmoPacks)
 		{
 			for (int i = 0; i < g_hDeployedAmmoPacks.Length; i++)
 			{
-				if (GetEntityDistance(iClient, g_hDeployedAmmoPacks.Get(i), true) > 589824.0)continue;
+				if (GetEntityDistance(iClient, g_hDeployedAmmoPacks.Get(i), true) > 589824.0) // 768
+					continue;
+				
 				bHasDeployedPackNearby = true;
 				break;
 			}
 		}
 		
-		int iPrimSlot, iPrimaryCount, iUpgradedCount;
-		for (int i = 1; i <= MaxClients; i++)
+		if (!bHasDeployedPackNearby)
 		{
-			if (!IsClientSurvivor(i))
-				continue;
-				
-			iPrimSlot = GetClientWeaponInventory(i, 0);
-			if (iPrimSlot == -1)continue;
-			
-			iPrimaryCount++;
-			if (GetEntProp(iPrimSlot, Prop_Send, "m_nUpgradedPrimaryAmmoLoaded", 1) > 0)
+			int iPrimSlot, iPrimaryCount, iUpgradedCount;
+			for (int i = 1; i <= MaxClients; i++)
 			{
-				iUpgradedCount++;
-			}
-		}
+				if (!IsClientSurvivor(i))
+					continue;
 
-		bool bCanSwitch = (!bHasDeployedPackNearby && iUpgradedCount < RoundFloat(iAlivePlayers * 0.25) && iPrimaryCount >= RoundFloat(iTeamCount * 0.25) && !IsValidClient(iTankTarget));
-		if (iCurWeapon == iWpnSlots[3])
-		{
-			if (iActiveDeployers > 1 || IsValidClient(iTeamLeader) && GetClientDistance(iClient, iTeamLeader, true) >= 65536.0 || !bCanSwitch)
-			{
-				SwitchWeaponSlot(iClient, (GetClientPrimaryAmmo(iClient) > 0 ? 0 : 1));
+				iPrimSlot = GetWeaponInInventory(i, 0);
+				if (!iPrimSlot)
+					continue;
+
+				iPrimaryCount++;
+				if (GetEntProp(iPrimSlot, Prop_Send, "m_nUpgradedPrimaryAmmoLoaded", 1) > 0)
+					iUpgradedCount++;
 			}
-			else
+
+			bool bCanSwitch = (iUpgradedCount < RoundFloat(iAlivePlayers * 0.25) && iPrimaryCount >= RoundFloat(iTeamCount * 0.25) && !iTankTarget);
+			if (iCurWeapon == iWpnSlots[3])
 			{
-				PressAttackButton(iClient, iButtons);
+				if (iActiveDeployers > 1 || IsValidClient(iTeamLeader) && GetClientDistance(iClient, iTeamLeader, true) >= 65536.0 || !bCanSwitch) // 256
+					SwitchWeaponSlot(iClient, (GetClientPrimaryAmmo(iClient) > 0 ? 0 : 1));
+				else
+					PressAttackButton(iClient, iButtons); // deploy ammo pack
 			}
-		}
-		else if (bCanSwitch && iActiveDeployers == 0 && LBI_IsSurvivorBotAvailable(iClient) && (!IsValidClient(iTeamLeader) || GetClientDistance(iClient, iTeamLeader, true) <= 36864.0))
-		{
-			SwitchWeaponSlot(iClient, 3);
+			else if (bCanSwitch && iActiveDeployers == 0 && LBI_IsSurvivorBotAvailable(iClient) && (!IsValidClient(iTeamLeader) || GetClientDistance(iClient, iTeamLeader, true) <= 36864.0)) // 192
+			{
+				SwitchWeaponSlot(iClient, 3);
+			}
 		}
 	}
 
-	if (g_bCvar_DefibRevive_Enabled && IsEntityExists(iDefibTarget) && !IsValidClient(iTankTarget) && !IsValidClient(iPinnedFriend) && !LBI_IsSurvivorInCombat(iClient))
+	int iDefibTarget = g_iBot_DefibTarget[iClient];
+	if (!L4D_IsValidEnt(iDefibTarget))
+	{
+		g_iBot_DefibTarget[iClient] = 0;
+	}
+	else if (g_bCvar_DefibRevive_Enabled && !iTankTarget && !iPinnedFriend && iInvFlags & FLAG_DEFIB && !LBI_IsSurvivorInCombat(iClient))
 	{
 		float fDefibPos[3]; GetEntityAbsOrigin(iDefibTarget, fDefibPos);
-		float fDefibDist = GetVectorDistance(g_fClientEyePos[iClient], fDefibPos, true);
-		if (fDefibDist <= (g_fCvar_DefibRevive_ScanDist*g_fCvar_DefibRevive_ScanDist) && !LBI_IsDamagingPosition(fDefibPos))
+		float fDefibDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fDefibPos, true);
+
+		if (fDefibDist <= g_fCvar_DefibRevive_ScanDist_Sqr && !LBI_IsDamagingPosition(fDefibPos))
 		{
-			g_iSurvivorBot_DefibTarget[iClient] = iDefibTarget;
-
-			if (SurvivorHasHealthKit(iClient) == 2)
+			if (L4D2_GetPlayerUseActionTarget(iClient) == iDefibTarget || fDefibDist <= 9216.0) // 96
 			{
-				if (L4D2_GetPlayerUseActionTarget(iClient) == iDefibTarget || fDefibDist <= 9216.0)
+				if (iCurWeapon != iWpnSlots[3])
 				{
-					if (iCurWeapon == iWpnSlots[3])
-					{
-						SnapViewToPosition(iClient, fDefibPos);
-						PressAttackButton(iClient, iButtons);
-					}
-					else
-					{
-						SwitchWeaponSlot(iClient, 3);
-					}
-				}
-				else if (!IsSurvivorBotBlindedByVomit(iClient) && !IsFinaleEscapeVehicleArrived() && LBI_IsSurvivorBotAvailable(iClient) && LBI_IsReachablePosition(iClient, fDefibPos) && 
-					g_iSurvivorBot_NearbyInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.66) && !IsValidClient(g_iSurvivorBot_IncapacitatedFriend[iClient])
-				)
-				{
-					SetMoveToPosition(iClient, fDefibPos, 2, "DefibPlayer");
-				}
-			}
-		}
-	}
-
-	static float fRndSearchTime;
-	if (g_iCvar_ItemScavenge_Items != 0 && GetGameTime() > g_fSurvivorBot_NextScavengeItemScanTime[iClient])
-	{
-		g_iSurvivorBot_ScavengeItem[iClient] = CheckForItemsToScavenge(iClient);		
-		fRndSearchTime = GetGameTime() + GetRandomFloat(0.5, 1.5);
-		g_fSurvivorBot_NextScavengeItemScanTime[iClient] = fRndSearchTime;
-	}
-
-	int iScavengeItem = g_iSurvivorBot_ScavengeItem[iClient];
-	if (IsEntityExists(iScavengeItem))
-	{
-		if (IsValidClient(GetEntityOwner(iScavengeItem)))
-		{
-			ClearMoveToPosition(iClient, "ScavengeItem");
-			g_iSurvivorBot_ScavengeItem[iClient] = -1;
-		}
-		else
-		{
-			int iUseButton = IN_USE;
-			bool bHoldKey = false;
-			float fUseRange = g_fCvar_ItemScavenge_PickupRange;
-			static bool bIncreasedTime = false;
-
-			static char sScavengeItem[64]; GetEntityClassname(iScavengeItem, sScavengeItem, sizeof(sScavengeItem));
-			if (strcmp(sScavengeItem, "point_prop_use_target") == 0 && IsSurvivorCarryingProp(iClient))
-			{
-				iUseButton = IN_ATTACK;
-				bHoldKey = true;
-				fUseRange = 32.0;
-
-				if (bIncreasedTime && L4D2_GetPlayerUseAction(iClient) != L4D2UseAction_PouringGas)
-				{
-					bIncreasedTime = false;
-				}
-			}
-			else if (strcmp(sScavengeItem, "func_button_timed") == 0)
-			{
-				bHoldKey = true;
-				fUseRange = 96.0;
-
-				if (bIncreasedTime && L4D2_GetPlayerUseAction(iClient) == L4D2UseAction_None && g_fSurvivorBot_NextScavengeItemScanTime[iClient] == fRndSearchTime)
-				{
-					bIncreasedTime = false;
-				}
-			}
-
-			if (!IsSurvivorBotBlindedByVomit(iClient) && (bHoldKey || !IsSurvivorBusy(iClient, true, true, true)))
-			{
-				float fItemPos[3]; GetEntityCenteroid(iScavengeItem, fItemPos);
-				if (GetVectorDistance(g_fClientEyePos[iClient], fItemPos, true) <= (fUseRange*fUseRange) && IsVisibleEntity(iClient, iScavengeItem))
-				{
-					if (GetGameTime() > g_fSurvivorBot_NextUsePressTime[iClient])
-					{
-						BotLookAtPosition(iClient, fItemPos, 0.33);
-						if ( LBI_FindUseEntity( iClient, fUseRange ) == iScavengeItem )
-						{
-							if (!bHoldKey)
-							{
-								g_fSurvivorBot_NextUsePressTime[iClient] = GetGameTime() + GetRandomFloat(0.1, 0.33);
-								if (GetRandomInt(1, 2) == 1)iButtons |= iUseButton;
-							}
-							else
-							{ 
-								iButtons |= iUseButton;
-								if (!bIncreasedTime)
-								{
-									bIncreasedTime = true;
-
-									float fAddTime;
-									if (strcmp(sScavengeItem, "func_button_timed") != 0)
-									{
-										fAddTime = g_fCvar_GasCanUseDuration;
-									}
-									else
-									{
-										fAddTime = GetEntPropFloat(iScavengeItem, Prop_Data, "m_nUseTime");
-									}
-
-									if (L4D2_IsUnderAdrenalineEffect(iClient))fAddTime *= 0.5;
-									g_fSurvivorBot_NextScavengeItemScanTime[iClient] = GetGameTime() + fAddTime + 0.33;
-								}
-							}
-						}
-					}
+					SwitchWeaponSlot(iClient, 3);
 				}
 				else
 				{
-					float fScavengePos[3]; 
-					fScavengePos = fItemPos;
-					
-					float fMaxDist = g_fCvar_ItemScavenge_ApproachVisibleRange;
-					int iScavengeArea = L4D_GetNearestNavArea(fItemPos, _, true, true, false);
-					if (iScavengeArea)
-					{										
-						LBI_GetClosestPointOnNavArea(iScavengeArea, fItemPos, fScavengePos);
-						if (!LBI_IsNavAreaPartiallyVisible(iScavengeArea, g_fClientEyePos[iClient], iClient))
-						{
-							fMaxDist = g_fCvar_ItemScavenge_ApproachRange;
-						}
+					SnapViewToPosition(iClient, fDefibPos);
+					PressAttackButton(iClient, iButtons); // use defib
+				}
+			}
+			else if (!g_iBot_IncapacitatedFriend[iClient] && !IsSurvivorBotBlindedByVomit(iClient) && !IsFinaleEscapeVehicleArrived() && 
+				LBI_IsSurvivorBotAvailable(iClient) && LBI_IsReachablePosition(iClient, fDefibPos) && 
+				g_iBot_NearbyInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.66)
+			)
+			{
+				SetMoveToPosition(iClient, fDefibPos, 2, "DefibPlayer");
+			}
+		}
+	}
+
+	int iScavengeItem = g_iBot_ScavengeItem[iClient];
+	if (iScavengeItem)
+	{
+		if (!L4D_IsValidEnt(iScavengeItem) || 1 <= GetEntityOwner(iScavengeItem) <= MaxClients)
+		{
+			ClearMoveToPosition(iClient, "ScavengeItem");
+			g_iBot_ScavengeItem[iClient] = 0;
+			g_fBot_ScavengeItemDist[iClient] = -1.0;
+		}
+		else if (!IsSurvivorBotBlindedByVomit(iClient) && !IsSurvivorBusy(iClient, true, true, true))
+		{
+			static float fItemPos[3];
+			GetEntityCenteroid(iScavengeItem, fItemPos);
+
+			if (GetVectorDistance(g_fClientEyePos[iClient], fItemPos, true) <= g_fCvar_ItemScavenge_PickupRange_Sqr && 
+				IsVisibleEntity(iClient, iScavengeItem))
+			{
+				BotLookAtPosition(iClient, fItemPos, 0.33);
+
+				if (IntervalHasPassed(0.2) && LBI_FindUseEntity(iClient, g_fCvar_ItemScavenge_PickupRange) == iScavengeItem)
+					iButtons |= IN_USE;
+			}
+			else
+			{
+				static bool bAllowScavenge, bCanRegroup;
+				static int iScavengeArea, iLeaderArea, iHits;
+				static float fMaxDist, fDist, fRangeMult, fDistanceToRegroup, fScavengePos[3];
+				
+				bAllowScavenge = true;
+				fScavengePos = fItemPos;
+				fDistanceToRegroup = -1.0;
+				fMaxDist = g_fCvar_ItemScavenge_ApproachVisibleRange;
+
+				fRangeMult = 1.0;
+				if (!g_bTeamHasHumanPlayer)
+					fRangeMult *= g_fCvar_ItemScavenge_NoHumansRangeMultiplier;
+				
+				iScavengeArea = L4D_GetNearestNavArea(fItemPos, 140.0, true, true, false);
+				iLeaderArea = g_iClientNavArea[iTeamLeader];
+				if (iScavengeArea && iLeaderArea)
+				{										
+					LBI_GetClosestPointOnNavArea(iScavengeArea, fItemPos, fScavengePos);
+					if (g_bTeamHasHumanPlayer && !LBI_IsNavAreaPartiallyVisible(iScavengeArea, g_fClientEyePos[iClient], iClient))
+						fMaxDist = g_fCvar_ItemScavenge_ApproachRange;
+
+					if (g_iBot_NearbyInfectedCount[iClient])
+					{
+						iHits = GetCommonHitsUntilDown(iClient, 0.66);
+						fDist = (fMaxDist / ((g_iBot_NearbyInfectedCount[iClient] + 1) / iHits));
+						if (fMaxDist > fDist)fMaxDist = fDist;
 					}
 
-					float fLeaderDist = -2.0;
-					if (iTeamLeader != iClient && IsValidClient(iTeamLeader))
-					{
-						fLeaderDist = GetClientTravelDistance(iTeamLeader, fScavengePos, true);
-					}
-					if (!bTeamHasHumanPlayer)fMaxDist *= g_fCvar_ItemScavenge_NoHumansRangeMultiplier;
+					bCanRegroup = L4D2_NavAreaBuildPath(view_as<Address>(iScavengeArea), view_as<Address>(iLeaderArea), (fMaxDist * fRangeMult), 2, false);
+					if (bCanRegroup)
+						fDistanceToRegroup = GetNavDistance(fScavengePos, g_fClientAbsOrigin[iTeamLeader], iScavengeItem, false);
+				}
+				else
+					bAllowScavenge = false;
 
-					if (g_iSurvivorBot_NearbyInfectedCount[iClient] < GetCommonHitsUntilDown(iClient, 0.66) && !LBI_IsDamagingPosition(fScavengePos) && !IsFinaleEscapeVehicleArrived() &&
-						(!IsValidClient(iTankTarget) || GetClientDistance(iClient, iTankTarget, true) > 262144.0 && GetVectorDistance(g_fClientAbsOrigin[iTankTarget], fScavengePos, true) > 147456.0) &&
-						LBI_IsReachableEntity(iClient, iScavengeItem) && !IsValidClient(g_iSurvivorBot_IncapacitatedFriend[iClient]) && (fLeaderDist == -2.0 || fLeaderDist != -1.0 && fLeaderDist <= ((fMaxDist * 0.75)*(fMaxDist * 0.75)))
-					)
-					{
-						SetMoveToPosition(iClient, fScavengePos, 1, "ScavengeItem");
-					}
-					else
-					{
-						ClearMoveToPosition(iClient, "ScavengeItem");								
-						g_iSurvivorBot_ScavengeItem[iClient] = -1;
-					}
+				if (bAllowScavenge && bCanRegroup && fDistanceToRegroup != -1.0 && fDistanceToRegroup < (fMaxDist * fRangeMult) && 
+					!LBI_IsDamagingPosition(fScavengePos) && !IsFinaleEscapeVehicleArrived() &&
+					(!iTankTarget || GetClientDistance(iClient, iTankTarget, true) > 262144.0 && GetVectorDistance(g_fClientAbsOrigin[iTankTarget], fScavengePos, true) > 147456.0) // 512 & 384
+				)
+				{
+					SetMoveToPosition(iClient, fScavengePos, 1, "ScavengeItem");
+				}
+				else
+				{
+					ClearMoveToPosition(iClient, "ScavengeItem");
+					g_iBot_ScavengeItem[iClient] = 0;
+					g_fBot_ScavengeItemDist[iClient] = -1.0;
 				}
 			}
 		}
 	}
+
+	return iAliveBots;
 }
 
 Action OnSurvivorSwitchWeapon(int iClient, int iWeapon) 
 {
-	if (!IsClientSurvivor(iClient) || !IsFakeClient(iClient) || g_bSurvivorBot_ForceSwitchWeapon[iClient] || !IsEntityExists(iWeapon) || L4D_IsPlayerIncapacitated(iClient))
+	if (!IsClientSurvivor(iClient) || !IsFakeClient(iClient) || g_bBot_ForceSwitchWeapon[iClient] || !L4D_IsValidEnt(iWeapon) || L4D_IsPlayerIncapacitated(iClient))
 	{
-		g_bSurvivorBot_ForceSwitchWeapon[iClient] = false;
+		g_bBot_ForceSwitchWeapon[iClient] = false;
 		return Plugin_Continue;
 	}
 
 	int iCurWeapon = L4D_GetPlayerCurrentWeapon(iClient);
 	if (iCurWeapon == -1 || iWeapon == iCurWeapon || GetWeaponClip1(iCurWeapon) < 0)
 	{
-		g_bSurvivorBot_ForceSwitchWeapon[iClient] = false;
+		g_bBot_ForceSwitchWeapon[iClient] = false;
 		return Plugin_Continue;
 	}
 
-	if (iWeapon == GetClientWeaponInventory(iClient, 0))
+	if (iWeapon == GetWeaponInInventory(iClient, 0))
 	{
-		if (GetSurvivorBotWeaponPreference(iClient) == L4D_WEAPON_PREFERENCE_SECONDARY)
+		if (GetBotWeaponPreference(iClient) == L4D_WEAPON_PREFERENCE_SECONDARY)
 		{
 			SwitchWeaponSlot(iClient, 1);
 			return Plugin_Handled;
 		}
 
-		if (iCurWeapon == GetClientWeaponInventory(iClient, 1))
+		if (iCurWeapon == GetWeaponInInventory(iClient, 1))
 		{
-			if (SurvivorHasMeleeWeapon(iClient))
+			if ( g_iClientInvFlags[iClient] & FLAG_MELEE )
 			{
-				if (GetGameTime() <= g_fSurvivorBot_BlockWeaponSwitchTime[iClient])
+				if (GetGameTime() <= g_fBot_BlockWeaponSwitchTime[iClient])
 				{
 					return Plugin_Handled;
 				}
 			}
 			else if (IsWeaponReloading(iCurWeapon) || GetWeaponClip1(iCurWeapon) != GetWeaponClipSize(iCurWeapon) && !LBI_IsSurvivorInCombat(iClient))
 			{
-				g_bSurvivorBot_ForceWeaponReload[iClient] = true;
+				g_bBot_ForceWeaponReload[iClient] = true;
 				return Plugin_Handled;
 			}
 		}
 	}
-	else if (iWeapon == GetClientWeaponInventory(iClient, 1)) 
+	else if (iWeapon == GetWeaponInInventory(iClient, 1)) 
 	{
-		if (iCurWeapon == GetClientWeaponInventory(iClient, 0) && GetClientPrimaryAmmo(iClient) > 0)
+		if (iCurWeapon == GetWeaponInInventory(iClient, 0) && GetClientPrimaryAmmo(iClient) > 0)
 		{
-			if (g_iSurvivorBot_NearbyInfectedCount[iClient] < g_iCvar_ImprovedMelee_SwitchCount2 && SurvivorHasMeleeWeapon(iClient) == 2)
+			if (g_iBot_NearbyInfectedCount[iClient] < g_iCvar_ImprovedMelee_SwitchCount2 && g_iClientInvFlags[iClient] & FLAG_CHAINSAW)
 			{
 				return Plugin_Handled;
 			}
 
-			if (GetSurvivorBotWeaponPreference(iClient) != L4D_WEAPON_PREFERENCE_SECONDARY && (!SurvivorHasMeleeWeapon(iClient) || g_iSurvivorBot_NearbyInfectedCount[iClient] < g_iCvar_ImprovedMelee_SwitchCount) && ((g_bCvar_DontSwitchToPistol && SurvivorHasSniperRifle(iClient)) || SurvivorHasShotgun(iClient)))
+			if (GetBotWeaponPreference(iClient) != L4D_WEAPON_PREFERENCE_SECONDARY && (g_iClientInvFlags[iClient] & FLAG_MELEE
+				|| g_iBot_NearbyInfectedCount[iClient] < g_iCvar_ImprovedMelee_SwitchCount )
+				&& ((g_bCvar_DontSwitchToPistol && g_iClientInvFlags[iClient] & FLAG_SNIPER) || g_iClientInvFlags[iClient] & FLAG_SHOTGUN))
 			{
 				return Plugin_Handled;
 			}
 		}
 	}
 
-	if (IsEntityExists(g_iSurvivorBot_DefibTarget[iClient]) && iCurWeapon == GetClientWeaponInventory(iClient, 3) && SurvivorHasHealthKit(iClient) == 2)
+	if (g_iBot_DefibTarget[iClient] && iCurWeapon == GetWeaponInInventory(iClient, 3) && g_iClientInvFlags[iClient] & FLAG_DEFIB)
 	{
 		return Plugin_Handled;
 	}
 
-	if (g_bCvar_AlwaysCarryProp && IsSurvivorCarryingProp(iClient) && (iWeapon == GetClientWeaponInventory(iClient, 0) || iWeapon == GetClientWeaponInventory(iClient, 1)))
-	{
-		int iTeamCount = (g_iSurvivorBot_NearbyFriends[iClient] / 2); if (iTeamCount < 1)iTeamCount = 1;
-		int iDropLimitCount = RoundFloat(GetCommonHitsUntilDown(iClient, 0.5) * float(iTeamCount));
-		if (g_iSurvivorBot_ThreatInfectedCount[iClient] < iDropLimitCount)return Plugin_Handled;
-	}
+	// if (g_bCvar_AlwaysCarryProp && IsSurvivorCarryingProp(iClient) && (iWeapon == GetWeaponInInventory(iClient, 0) || iWeapon == GetWeaponInInventory(iClient, 1)))
+	// {
+	// 	int iTeamCount = (g_iBot_NearbyFriends[iClient] / 2); if (iTeamCount < 1)iTeamCount = 1;
+	// 	int iDropLimitCount = RoundFloat(GetCommonHitsUntilDown(iClient, 0.5) * float(iTeamCount));
+	// 	if (g_iBot_ThreatInfectedCount[iClient] < iDropLimitCount)return Plugin_Handled;
+	// }
 
-	g_bSurvivorBot_ForceSwitchWeapon[iClient] = false;
+	g_bBot_ForceSwitchWeapon[iClient] = false;
 	return Plugin_Continue;
 }
 
@@ -2495,7 +3064,7 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 		for (int i = 0; i < g_hWitchList.Length; i++)
 		{
 			iWitchRef = EntRefToEntIndex(g_hWitchList.Get(i));
-			if (iWitchRef == INVALID_ENT_REFERENCE || !IsEntityExists(iWitchRef))
+			if (iWitchRef == INVALID_ENT_REFERENCE || !L4D_IsValidEnt(iWitchRef))
 			{
 				g_hWitchList.Erase(i);
 				continue;
@@ -2515,16 +3084,16 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 	{
 		float fLookPos[3]; GetEntityCenteroid(iAttacker, fLookPos);
 		BotLookAtPosition(iClient, fLookPos, 1.0);
-		g_bSurvivorBot_ForceBash[iClient] = true;
+		g_bBot_ForceBash[iClient] = true;
 	}
 
-	if (g_bCvar_NoFallDmgOnLadderFail && iDamageType & DMG_FALL && GetGameTime() <= g_fSurvivorBot_TimeSinceLeftLadder[iClient])
+	if (g_bCvar_NoFallDmgOnLadderFail && iDamageType & DMG_FALL && GetGameTime() <= g_fBot_TimeSinceLeftLadder[iClient])
 	{
 		fDamage = 0.0;
 		return Plugin_Changed; 
 	}
 
-	if (!g_bCvar_SpitterAcidEvasion || !IsEntityExists(iInflictor) || strcmp(g_sSurvivorBot_MovePos_Name[iClient], "EscapeInferno") == 0)
+	if (!g_bCvar_AcidEvasion || !L4D_IsValidEnt(iInflictor) || strcmp(g_sBot_MovePos_Name[iClient], "EscapeInferno") == 0)
 		return Plugin_Continue; 
 
 	static char sInfClass[16]; GetEntityClassname(iInflictor, sInfClass, sizeof(sInfClass));
@@ -2554,6 +3123,45 @@ Action OnSurvivorTakeDamage(int iClient, int &iAttacker, int &iInflictor, float 
 		SetMoveToPosition(iClient, fEscapePos, 4, "EscapeInferno", 0.0, 5.0, true, true);
 
 	return Plugin_Continue; 
+}
+
+Action OnWitchTakeDamage(int iWitch, int &iAttacker, int &iInflictor, float &fDamage, int &iDamageType) 
+{
+	if (iDamageType & (DMG_BULLET | DMG_BLAST | DMG_BLAST_SURFACE))
+		CreateTimer(0.1, CheckWitchStumble, iWitch);
+
+	return Plugin_Continue; 
+}
+
+public Action CheckWitchStumble(Handle timer, int iWitch)
+{
+	if (L4D_IsValidEnt(iWitch))
+	{
+		static int iWitchRef;
+		static float fWitchRage;
+		
+		for (int i = 0; i < g_hWitchList.Length; i++)
+		{
+			iWitchRef = EntRefToEntIndex(g_hWitchList.Get(i));
+			if (iWitchRef == INVALID_ENT_REFERENCE || !L4D_IsValidEnt(iWitchRef))
+			{
+				g_hWitchList.Erase(i);
+				continue;
+			}
+
+			if (iWitchRef == iWitch)
+			{
+				fWitchRage = GetEntPropFloat(iWitch, Prop_Send, "m_rage");
+				if (g_hWitchList.Get(i, 1) == 0 && fWitchRage > 0.99)
+				{
+					g_hWitchList.Set(i, -1, 1);
+					SDKUnhook(iWitch, SDKHook_OnTakeDamage, OnWitchTakeDamage);
+					break;
+				}
+			}
+		}
+	}
+	return Plugin_Handled;
 }
 
 bool TakeCoverFromPosition(int iClient, float fPosition[3], float fSearchDist = 384.0)
@@ -2590,141 +3198,243 @@ bool TakeCoverFromEntity(int iClient, int iEntity, float fSearchDist = 384.0)
 	return (TakeCoverFromPosition(iClient, fEntityPos, fSearchDist));
 }
 
-/*static float g_fSurvivorBot_UpdateRetreatPosTime[MAXPLAYERS+1];
-bool TryRetreatingFromEntity(int iClient, int iEntity, float fSearchDist = 1024.0)
+// ----------------------------------------------------------------------------------------------------
+
+// AI Move types from the lowest to the highest priority one
+// HighPriority is used in spit/charger dodging and other high priority MOVEs
+// enum AI_MOVE_TYPE {
+// 	None = 0,
+// 	Order = 1,
+// 	Pickup = 2,
+// 	Defib = 3,
+// 	Door = 4, // This is used for saferoom doors only (other doors are handled as orders and so with Order priority)
+// 	HighPriority = 5
+// }
+
+#define CODE_BUFFER_LENGTH	1006
+
+bool IsBusyDoingL4BStuff(int iClient)
 {
-	if (GetGameTime() <= g_fSurvivorBot_UpdateRetreatPosTime[iClient] && strcmp(g_sSurvivorBot_MovePos_Name[iClient], "RetreatFromEntity") == 0)
-		return true;
+	if (!g_bHasLeft4Bots)
+		return false;
 
-	float fEntityPos[3]; GetEntityAbsOrigin(iEntity, fEntityPos);
-	float fEntityDist = GetVectorTravelDistance(fEntityPos, g_fClientAbsOrigin[iClient], true);
+	// -------------------------
 
-	float fSelfToPos[3]; MakeVectorFromPoints(g_fClientAbsOrigin[iClient], fEntityPos, fSelfToPos);
-	NormalizeVector(fSelfToPos, fSelfToPos);
+	char sOutputBuffer[CODE_BUFFER_LENGTH];
+	static char sCodeBuffer[CODE_BUFFER_LENGTH];
 
-	float fDot, fPathPos[3], fPathOffset[3], fSelfToMovePos[3];
-	for (int i = 0; i < 10; i++)
+	FormatEx(sCodeBuffer, CODE_BUFFER_LENGTH, 
+		"if ((\"Left4Bots\" in getroottable()))\
+			<RETURN>\"True\"</RETURN>"
+	);
+
+	L4D2_GetVScriptOutput(sCodeBuffer, sOutputBuffer, CODE_BUFFER_LENGTH);
+	if (sOutputBuffer[0] == EOS)
 	{
-		LBI_TryGetPathableLocationWithin(iClient, fSearchDist, fPathPos);
-		if (!IsValidVector(fPathPos) || LBI_IsDamagingPosition(fPathPos))continue;
-
-		fPathOffset = fPathPos; fPathOffset[2] + HUMAN_HALF_HEIGHT;
-
-		MakeVectorFromPoints(g_fClientEyePos[iClient], fPathPos, fSelfToMovePos);
-		NormalizeVector(fSelfToMovePos, fSelfToMovePos);
-
-		fDot = GetVectorDotProduct(fSelfToPos, fSelfToMovePos);
-		if (fDot > 0.33 || GetVectorTravelDistance(fEntityPos, fPathPos, true) < fEntityDist)continue;
-
-		SetMoveToPosition(iClient, fPathPos, 3, "RetreatFromEntity");
-		g_fSurvivorBot_UpdateRetreatPosTime[iClient] = GetGameTime() + 3.0;
-		return true;
+		g_bHasLeft4Bots = false;
+		return false;
 	}
 
-	return false;
-}*/
+	// -------------------------
+
+	static char sInitCode[CODE_BUFFER_LENGTH];
+	FormatEx(sInitCode, CODE_BUFFER_LENGTH, "local ply = GetPlayerFromUserID(%i);\
+		ply.ValidateScriptScope();\
+		local scope = ply.GetScriptScope();", 
+		GetClientUserId(iClient)
+	);
+
+	FormatEx(sCodeBuffer, CODE_BUFFER_LENGTH, "%s\
+		<RETURN>scope.MoveType</RETURN>",
+	sInitCode);
+
+	L4D2_GetVScriptOutput(sCodeBuffer, sOutputBuffer, CODE_BUFFER_LENGTH);
+	int iMoveType = StringToInt(sOutputBuffer);
+
+	// Current Order
+	FormatEx(sCodeBuffer, CODE_BUFFER_LENGTH, "%s\
+		local order = scope.CurrentOrder;\
+		if (order && order.OrderType)\
+			<RETURN>order.OrderType</RETURN>",
+	sInitCode);
+
+	char sOrderType[32];
+	L4D2_GetVScriptOutput(sCodeBuffer, sOrderType, CODE_BUFFER_LENGTH);
+
+	// PrintToServer("%N's L4B2 Stuff: MoveType = %i	OrderType = %s", iClient, 
+	// 	iMoveType,
+	// 	sOrderType
+	// );
+
+	return (iMoveType > 0 && iMoveType != 2 && (iMoveType != 1 || strcmp(sOrderType, "lead") != 0));
+}
+
+// ----------------------------------------------------------------------------------------------------
 
 void ClearMoveToPosition(int iClient, const char[] sCheckName = "")
 {
-	if (sCheckName[0] != 0 && strcmp(g_sSurvivorBot_MovePos_Name[iClient], sCheckName) != 0)
+	if (g_iCvar_Debug & DEBUG_MOVE && ( g_iCvar_DebugClient == 0 || iClient == g_iCvar_DebugClient ))
+	{
+		static int iAbort;
+		static char szOutputBuffer[128], sClientName[128];
+		
+		iAbort = view_as<int>(sCheckName[0] != 0 && strcmp(g_sBot_MovePos_Name[iClient], sCheckName) != 0)
+			| view_as<int>(!IsValidVector(g_fBot_MovePos_Position[iClient])) << 1
+			| view_as<int>(LBI_IsDamagingNavArea(g_iClientNavArea[iClient])) << 2;
+		
+		szOutputBuffer[0] = EOS;
+		sClientName[0] = EOS;
+		GetClientName(iClient, sClientName, sizeof(sClientName));
+		
+		Format(szOutputBuffer, sizeof(szOutputBuffer), "ClearMoveToPosition %d %s type %s%s%s%s%s", iClient, sClientName,
+			(sCheckName[0] != 0 ? sCheckName : "not specified"), (iAbort != 0 ? ", aborted " : ""),
+			(iAbort & 1 ? "(different move cmd)" : ""),(iAbort & 2 ? "(invalid pos)" : ""),(iAbort & 4 ? "(damaging nav)" : ""));
+		PrintToServer(szOutputBuffer);
+		
+		if (iAbort != 0)
+			return;
+	}
+	else if ( sCheckName[0] != 0 && strcmp(g_sBot_MovePos_Name[iClient], sCheckName) != 0
+			|| !IsValidVector(g_fBot_MovePos_Position[iClient])
+			|| LBI_IsDamagingNavArea(g_iClientNavArea[iClient]) )
 		return;
 
-	if (!IsValidVector(g_fSurvivorBot_MovePos_Position[iClient]) || LBI_IsDamagingNavArea(g_iClientNavArea[iClient]))
-		return;
+	g_iBot_MovePos_Priority[iClient] = -1;
+	g_fBot_MovePos_Duration[iClient] = GetGameTime();
+	g_fBot_MovePos_Tolerance[iClient] = -1.0;
+	g_bBot_MovePos_IgnoreDamaging[iClient] = false;
+	g_sBot_MovePos_Name[iClient][0] = 0;
 
-	g_iSurvivorBot_MovePos_Priority[iClient] = -1;
-	g_fSurvivorBot_MovePos_Duration[iClient] = GetGameTime();
-	g_fSurvivorBot_MovePos_Tolerance[iClient] = -1.0;
-	g_bSurvivorBot_MovePos_IgnoreDamaging[iClient] = false;
-	g_sSurvivorBot_MovePos_Name[iClient][0] = 0;
-
-	SetVectorToZero(g_fSurvivorBot_MovePos_Position[iClient]);
+	SetVectorToZero(g_fBot_MovePos_Position[iClient]);
 	L4D2_CommandABot(iClient, 0, BOT_CMD_RESET);
 }
 
 void SetMoveToPosition(int iClient, float fMovePos[3], int iPriority, const char[] sName = "", float fAddDuration = 0.66, float fDistTolerance = -1.0, bool bIgnoreDamaging = false, bool bIgnoreCheckpoints = false)
 {
-	if (iPriority < g_iSurvivorBot_MovePos_Priority[iClient] || IsValidVector(g_fSurvivorBot_MovePos_Position[iClient]))
+	static int iAbort;
+	static float fNavDist, fTravelDist, fMaxSpeed, fMoveTime;
+	static char szOutputBuffer[320], sClientName[128];
+	
+	if (g_iCvar_Debug & DEBUG_MOVE && ( g_iCvar_DebugClient == 0 || iClient == g_iCvar_DebugClient ))
+	{	
+		iAbort = view_as<int>(iPriority < g_iBot_MovePos_Priority[iClient])
+			| view_as<int>(IsValidVector(g_fBot_MovePos_Position[iClient])) << 1
+			| view_as<int>(fDistTolerance >= 0.0 && GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos, true) <= (fDistTolerance*fDistTolerance)) << 2
+			| view_as<int>(!bIgnoreDamaging && (LBI_IsDamagingNavArea(g_iClientNavArea[iClient]) || LBI_IsDamagingPosition(fMovePos))) << 3
+			| view_as<int>(!bIgnoreCheckpoints && LBI_IsPositionInsideCheckpoint(g_fClientAbsOrigin[iClient]) && !LBI_IsPositionInsideCheckpoint(fMovePos)) << 4;
+		
+		szOutputBuffer[0] = EOS;
+		sClientName[0] = EOS;
+	}
+	else if ( iPriority < g_iBot_MovePos_Priority[iClient] || IsValidVector(g_fBot_MovePos_Position[iClient])
+			|| fDistTolerance >= 0.0 && GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos, true) <= (fDistTolerance*fDistTolerance)
+			|| !bIgnoreDamaging && (LBI_IsDamagingNavArea(g_iClientNavArea[iClient]) || LBI_IsDamagingPosition(fMovePos))
+			|| !bIgnoreCheckpoints && LBI_IsPositionInsideCheckpoint(g_fClientAbsOrigin[iClient]) && !LBI_IsPositionInsideCheckpoint(fMovePos)
+			|| IsBusyDoingL4BStuff(iClient) && iPriority <= 2 )
 		return;
 
-	if (fDistTolerance >= 0.0 && GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos, true) <= (fDistTolerance*fDistTolerance))
-		return;
+	//float fTravelDist = GetClientTravelDistance(iClient, fMovePos, true);
+	fNavDist = GetNavDistance(g_fClientAbsOrigin[iClient], fMovePos, _, false);
+	fTravelDist = fNavDist <= 0.0 ? GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos) : fNavDist;
+	fMaxSpeed = GetClientMaxSpeed(iClient);
+	fMoveTime = fTravelDist / fMaxSpeed + fAddDuration;
+	
+	if (g_iCvar_Debug & DEBUG_MOVE && ( g_iCvar_DebugClient == 0 || iClient == g_iCvar_DebugClient ))
+	{
+		GetClientName(iClient, sClientName, sizeof(sClientName));
+		
+		Format(szOutputBuffer, sizeof(szOutputBuffer), "SetMoveToPosition %d %s %d %s fAddDur %.2f fDistTol %.2f%s%s\
+			\nfNavDist %.2f fTravelDist %.2f fMaxSpeed %.2f fMoveTime %.2f iAbort %d\n%s%s%s%s%s",
+			iClient, sClientName, iPriority, sName, fAddDuration, fDistTolerance,
+			(bIgnoreDamaging ? "(ignore damaging)" : ""), (bIgnoreCheckpoints ? "(ignore checkpoint)" : ""),
+			fNavDist, fTravelDist, fMaxSpeed, fMoveTime, iAbort,
+			(iAbort & 1 ? "(lower priority)" : ""),(iAbort & 2 ? "(valid pos)" : ""),(iAbort & 4 ? "(close enough)" : ""),
+			(iAbort & 8 ? "(damaging position)" : ""),(iAbort & 16 ? "(outside of checkpoint)" : ""));
+		PrintToServer(szOutputBuffer);
+		
+		if (iAbort != 0)
+			return;
+	}
 
-	if (!bIgnoreDamaging && (LBI_IsDamagingNavArea(g_iClientNavArea[iClient]) || LBI_IsDamagingPosition(fMovePos)))
-		return;
-
-	if (!bIgnoreCheckpoints && LBI_IsPositionInsideCheckpoint(g_fClientAbsOrigin[iClient]) && !LBI_IsPositionInsideCheckpoint(fMovePos))
-		return;
-
-	float fTravelDist = GetClientTravelDistance(iClient, fMovePos, true);
-	if (fTravelDist <= 0.0)fTravelDist = GetVectorDistance(g_fClientAbsOrigin[iClient], fMovePos, true);
-
-	float fMaxSpeed = GetClientMaxSpeed(iClient);
-	g_fSurvivorBot_MovePos_Duration[iClient] = GetGameTime() + (fTravelDist / (fMaxSpeed*fMaxSpeed)) + fAddDuration;
-
-	strcopy(g_sSurvivorBot_MovePos_Name[iClient], 512, sName);
-
-	g_fSurvivorBot_MovePos_Position[iClient] = fMovePos;
-	g_iSurvivorBot_MovePos_Priority[iClient] = iPriority;
-	g_fSurvivorBot_MovePos_Tolerance[iClient] = fDistTolerance;
-	g_bSurvivorBot_MovePos_IgnoreDamaging[iClient] = bIgnoreDamaging;
+	strcopy(g_sBot_MovePos_Name[iClient], 64, sName);
+	//g_fBot_MovePos_Duration[iClient] = GetGameTime() + (fTravelDist / (fMaxSpeed*fMaxSpeed)) + fAddDuration;
+	g_fBot_MovePos_Duration[iClient] = GetGameTime() + fMoveTime;
+	g_fBot_MovePos_Position[iClient] = fMovePos;
+	g_iBot_MovePos_Priority[iClient] = iPriority;
+	g_fBot_MovePos_Tolerance[iClient] = fDistTolerance;
+	g_bBot_MovePos_IgnoreDamaging[iClient] = bIgnoreDamaging;
 }
 
+// this shit is ass, but vscript plugin crashes the game now, so...
 void LBI_TryGetPathableLocationWithin(int iClient, float fRadius, float fBuffer[3])
 {
-	char sBuffer[512];
-	FormatEx(sBuffer, sizeof(sBuffer), "local ply = GetPlayerFromUserID(%i);\
+	static char sCodeBuffer[512];
+	FormatEx(sCodeBuffer, sizeof(sCodeBuffer), "local ply = GetPlayerFromUserID(%i);\
 		local location = ply.TryGetPathableLocationWithin(%f);\
 		local spaceChar = 32;\
-		<RETURN>location.x.tostring() + spaceChar.tochar() + location.y.tostring() + spaceChar.tochar() + location.z.tostring()</RETURN>", GetClientUserId(iClient), fRadius);
-	L4D2_GetVScriptOutput(sBuffer, sBuffer, sizeof(sBuffer));
+		<RETURN>location.x.tostring() + spaceChar.tochar() + location.y.tostring() + spaceChar.tochar() + location.z.tostring()</RETURN>",
+		GetClientUserId(iClient), fRadius
+	);
 
-	char sCoordinate[64];
-	SplitString(sBuffer, " ", sCoordinate, sizeof(sCoordinate));
-	fBuffer[0] = StringToFloat(sCoordinate);
-	FormatEx(sCoordinate, sizeof(sCoordinate), "%s ", sCoordinate);
-	ReplaceString(sBuffer, sizeof(sBuffer), sCoordinate, "");
+	char szOutputBuffer[512];
+	L4D2_GetVScriptOutput(sCodeBuffer, szOutputBuffer, sizeof(szOutputBuffer));
 
-	SplitString(sBuffer, " ", sCoordinate, sizeof(sCoordinate));
-	fBuffer[1] = StringToFloat(sCoordinate);
-	FormatEx(sCoordinate, sizeof(sCoordinate), "%s ", sCoordinate);
-	ReplaceString(sBuffer, sizeof(sBuffer), sCoordinate, "");
+	char szOrigin[64];
+	// X
+	SplitString(szOutputBuffer, " ", szOrigin, sizeof(szOrigin));
+	fBuffer[0] = StringToFloat(szOrigin);
+	FormatEx(szOrigin, sizeof(szOrigin), "%s ", szOrigin);
+	ReplaceString(szOutputBuffer, sizeof(szOutputBuffer), szOrigin, "");
 
-	fBuffer[2] = StringToFloat(sBuffer);
+	// Y
+	SplitString(szOutputBuffer, " ", szOrigin, sizeof(szOrigin));
+	fBuffer[1] = StringToFloat(szOrigin);
+	FormatEx(szOrigin, sizeof(szOrigin), "%s ", szOrigin);
+	ReplaceString(szOutputBuffer, sizeof(szOutputBuffer), szOrigin, "");
+
+	// Z
+	fBuffer[2] = StringToFloat(szOutputBuffer);
 }
 
 bool SurvivorBot_IsTargetShootable(int iClient, int iTarget, int iCurWeapon, float fAimPos[3])
 {
-	int iPrimarySlot = GetClientWeaponInventory(iClient, 0);
+	int iPrimarySlot = GetWeaponInInventory(iClient, 0);
 	bool bInViewCone = (GetClientAimTarget(iClient, false) == iTarget);	
 	if (!bInViewCone)
 	{
 		float fCone = 2.0 * (512.0 / GetVectorDistance(g_fClientEyePos[iClient], g_fClientCenteroid[iTarget]));
-		if (iCurWeapon == iPrimarySlot && SurvivorHasShotgun(iClient))fCone *= 2.0;
-		bInViewCone = (FVectorInViewCone(iClient, g_fClientCenteroid[iTarget], fCone) && IsVisibleEntity(iClient, iTarget));
+		if (iCurWeapon == iPrimarySlot && g_iClientInvFlags[iClient] & FLAG_SHOTGUN)
+			fCone *= 2.0;
+		bInViewCone = ( FVectorInViewCone(iClient, g_fClientCenteroid[iTarget], fCone) && IsVisibleEntity(iClient, iTarget) );
 	}
 
 	if (IsValidClient(iTarget))
 	{
+		L4D2ZombieClassType iClass = L4D2_GetPlayerZombieClass(iTarget);
 		if (bInViewCone)
 		{
-			L4D2ZombieClassType iClass = L4D2_GetPlayerZombieClass(iTarget);
 			if (iClass == L4D2ZombieClass_Boomer && GetClientDistance(iClient, iTarget, true) <= BOT_BOOMER_AVOID_RADIUS_SQR)
 				return false;
-			if (iClass == L4D2ZombieClass_Tank && iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) < 3 && IsWeaponReloading(iCurWeapon, false) && SurvivorHasShotgun(iClient))
+			if (iClass == L4D2ZombieClass_Tank && iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) < 3 && IsWeaponReloading(iCurWeapon, false) && g_iClientInvFlags[iClient] & FLAG_SHOTGUN)
 				return false;
 		}
+		
+		// if nightmare, don't bother shooting at howlers and wasting ammo
+		if (g_bCvar_Nightmare && iCurWeapon == iPrimarySlot && iClass == L4D2ZombieClass_Jockey)
+			return false;
 
 		if (GetClientTeam(iTarget) == 2 && !L4D_IsPlayerPinned(iTarget) && !L4D_IsPlayerIncapacitated(iClient))
 		{
-			if (bInViewCone && !g_bCvar_BotsShootThrough && (iCurWeapon == iPrimarySlot || iCurWeapon == GetClientWeaponInventory(iClient, 1) && (!SurvivorHasMeleeWeapon(iClient) || GetClientDistance(iClient, iTarget) <= 96.0)))
+			if (bInViewCone && !g_bCvar_BotsShootThrough && (iCurWeapon == iPrimarySlot || iCurWeapon == GetWeaponInInventory(iClient, 1)
+				&& ( ~g_iClientInvFlags[iClient] & FLAG_MELEE || GetClientDistance(iClient, iTarget) <= 96.0)))
 				return false;
 
 			if (g_bCvar_BotsFriendlyFire) 
 			{
 				if (GetClientDistance(iClient, iTarget, true) <= 256.0)
 					return false;
-				if (iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) != 0 && GetVectorDistance(fAimPos, g_fClientCenteroid[iTarget], true) <= 90000.0 && SurvivorHasTier3Weapon(iClient) == 1 && GetVectorVisible(fAimPos, g_fClientCenteroid[iTarget]))
+				if (iCurWeapon == iPrimarySlot && GetWeaponClip1(iCurWeapon) != 0 && GetVectorDistance(fAimPos, g_fClientCenteroid[iTarget], true) <= 90000.0
+				&& g_iClientInvFlags[iClient] & FLAG_GL && GetVectorVisible(fAimPos, g_fClientCenteroid[iTarget]))
 					return false;
 			}
 		}
@@ -2738,27 +3448,29 @@ bool SurvivorBot_IsTargetShootable(int iClient, int iTarget, int iCurWeapon, flo
 bool SurvivorBot_CanFreelyFireWeapon(int iClient)
 {	
 	int iCurWeapon = L4D_GetPlayerCurrentWeapon(iClient);
-	if (g_bCvar_AlwaysCarryProp && iCurWeapon == GetClientWeaponInventory(iClient, 5))
-	{
-		if (g_bCvar_AlwaysCarryProp)return false;
-		int iTeamCount = (g_iSurvivorBot_NearbyFriends[iClient] / 2); if (iTeamCount < 1)iTeamCount = 1;
-		int iDropLimitCount = RoundFloat(GetCommonHitsUntilDown(iClient, 0.5) * float(iTeamCount));
-		return (g_iSurvivorBot_ThreatInfectedCount[iClient] >= iDropLimitCount);
-	}
+	// if (g_bCvar_AlwaysCarryProp && iCurWeapon == GetWeaponInInventory(iClient, 5))
+	// {
+	// 	if (g_bCvar_AlwaysCarryProp)return false;
+	// 	int iTeamCount = (g_iBot_NearbyFriends[iClient] / 2); if (iTeamCount < 1)iTeamCount = 1;
+	// 	int iDropLimitCount = RoundFloat(GetCommonHitsUntilDown(iClient, 0.5) * float(iTeamCount));
+	// 	return (g_iBot_ThreatInfectedCount[iClient] >= iDropLimitCount);
+	// }
 
 	float fAimPos[3]; GetClientAimPosition(iClient, fAimPos);
-	if (iCurWeapon == GetClientWeaponInventory(iClient, 0))
+	if (iCurWeapon == GetWeaponInInventory(iClient, 0))
 	{
 		int iClip = GetWeaponClip1(iCurWeapon);
-		if (g_bCvar_BotsFriendlyFire && iClip != 0 && GetVectorDistance(fAimPos, g_fClientCenteroid[iClient], true) <= 90000.0 && SurvivorHasTier3Weapon(iClient) == 1 && GetVectorVisible(fAimPos, g_fClientCenteroid[iClient]))
+		if (g_bCvar_BotsFriendlyFire && iClip != 0 && GetVectorDistance(fAimPos, g_fClientCenteroid[iClient], true) <= 90000.0
+		&& g_iClientInvFlags[iClient] & FLAG_GL && GetVectorVisible(fAimPos, g_fClientCenteroid[iClient]))
 		{
-			if (IsEntityExists(g_iSurvivorBot_TargetInfected[iClient]) && (!SurvivorHasMeleeWeapon(iClient) || GetVectorDistance(fAimPos, g_fClientCenteroid[iClient], true) <= g_fCvar_ImprovedMelee_SwitchRange))
+			if (g_iBot_TargetInfected[iClient] && ( ~g_iClientInvFlags[iClient] & FLAG_MELEE
+			|| GetVectorDistance(fAimPos, g_fClientCenteroid[iClient], true) <= g_fCvar_ImprovedMelee_SwitchRange))
 				SwitchWeaponSlot(iClient, 1);
 
 			return false;
 		}
 
-		if (iClip < 2 && IsWeaponReloading(iCurWeapon, false) && SurvivorHasShotgun(iClient))
+		if (iClip < 2 && IsWeaponReloading(iCurWeapon, false) && g_iClientInvFlags[iClient] & FLAG_SHOTGUN)
 			return false;
 	}
 
@@ -2819,7 +3531,7 @@ void GetClosestToEyePosEntityBonePos(int iClient, int iTarget, float fAimPos[3])
 
 void GetTargetAimPart(int iClient, int iTarget, float fAimPos[3])
 {
-	if (IsWeaponSlotActive(iClient, 0) && SurvivorHasTier3Weapon(iClient) == 1 && (!IsValidClient(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Jockey))
+	if (IsWeaponSlotActive(iClient, 0) && g_iClientInvFlags[iClient] & FLAG_GL && (!IsValidClient(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Jockey))
 	{
 		GetEntityAbsOrigin(iTarget, fAimPos);
 		return;
@@ -2828,7 +3540,8 @@ void GetTargetAimPart(int iClient, int iTarget, float fAimPos[3])
 	static char sAimBone[64];
 	float fDist = GetEntityDistance(iClient, iTarget, true);
 	bool bIsUsingOldSkeleton = (SDKCall(g_hLookupBone, iTarget, "ValveBiped.Bip01_Pelvis") != -1);
-	if (IsWitch(iTarget) && fDist <= 65536.0 && IsWeaponSlotActive(iClient, 0) && SurvivorHasShotgun(iClient) || (L4D_IsPlayerIncapacitated(iClient) && fDist <= 147456.0 || L4D2_IsRealismMode() && fDist <= 262144.0) && (!IsValidClient(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Tank))
+	if (IsWitch(iTarget) && fDist <= 65536.0 && IsWeaponSlotActive(iClient, 0) && g_iClientInvFlags[iClient] & FLAG_SHOTGUN || (L4D_IsPlayerIncapacitated(iClient)
+		&& fDist <= 147456.0 || L4D2_IsRealismMode() && fDist <= 262144.0) && (!IsValidClient(iTarget) || L4D2_GetPlayerZombieClass(iTarget) != L4D2ZombieClass_Tank))
 	{
 		sAimBone = (bIsUsingOldSkeleton ? "ValveBiped.Bip01_Head1" : "bip_head");
 	}
@@ -2884,7 +3597,7 @@ bool CheckIfCanRescueImmobilizedFriend(int iClient)
 
 	if (!L4D_IsPlayerIncapacitated(iClient)) 
 	{		
-		if (g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.33))
+		if (g_iBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.33))
 			return false;
 
 		if (IsSurvivorBusy(iClient))
@@ -2896,8 +3609,8 @@ bool CheckIfCanRescueImmobilizedFriend(int iClient)
 
 void BotLookAtPosition(int iClient, float fLookPos[3], float fLookDuration = 0.33)
 {
-	g_fSurvivorBot_LookPosition[iClient] = fLookPos;
-	g_fSurvivorBot_LookPosition_Duration[iClient] = GetGameTime() + fLookDuration;
+	g_fBot_LookPosition[iClient] = fLookPos;
+	g_fBot_LookPosition_Duration[iClient] = GetGameTime() + fLookDuration;
 }
 
 bool IsUsingSpecialAbility(int iClient)
@@ -2934,7 +3647,8 @@ int CalculateGrenadeThrowInfectedCount()
 			continue;
 
 		iFreeSurvivors++;
-		if (IsWeaponSlotActive(i, 1) && SurvivorHasMeleeWeapon(i) == 2)iFreeSurvivors++;
+		if ( IsWeaponSlotActive(i, 1) && g_iClientInvFlags[i] & FLAG_CHAINSAW )
+			iFreeSurvivors++;
 	}
 
 	float fCountScale = g_fCvar_GrenadeThrow_HordeSize;
@@ -2944,73 +3658,58 @@ int CalculateGrenadeThrowInfectedCount()
 	return iFinalCount;
 }
 
-bool CheckCanThrowGrenade(int iClient, int iTarget, float fClientPos[3], float fThrowPos[3], bool bTeammateNearThrowArea, bool bIsThrowTargetTank)
+bool CheckCanThrowGrenade(int iClient, int iTarget, int iGrenadeType, float fThrowPos[3], bool bIsThrowTargetTank)
 {
-	if (g_iSurvivorBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.33))
+	if (IsWeaponReloading(L4D_GetPlayerCurrentWeapon(iClient)))
 		return false;
 
-	if (IsWeaponReloading(L4D_GetPlayerCurrentWeapon(iClient)))
+	if (g_iBot_ThreatInfectedCount[iClient] >= GetCommonHitsUntilDown(iClient, 0.33))
 		return false;
 
 	if (IsSurvivorBusy(iClient, _, true, true))
 		return false;
 
-	int iGrenadeType = SurvivorHasGrenade(iClient);
-	if (iGrenadeType == 0)return false;
-
 	int iGrenadeBit = (iGrenadeType == 2 ? 1 : iGrenadeType == 3 ? 2 : 0);
-	if (g_iCvar_GrenadeThrow_GrenadeTypes & (1 << iGrenadeBit) == 0)return false;
+	if (g_iCvar_GrenadeThrow_GrenadeTypes & (1 << iGrenadeBit) == 0)
+		return false;
 
 	if (iGrenadeType == 2) 
 	{
-		if (bTeammateNearThrowArea)
-		{
+		if (g_bBot_IsFriendNearThrowArea[iClient])
 			return false;
-		}
 
-		if (GetGameTime() < g_fSurvivorBot_Grenade_NextThrowTime_Molotov)
-		{
+		if ((fThrowPos[2] - g_fClientAbsOrigin[iClient][2]) > 256.0)
 			return false;
-		}
 
-		if ((fThrowPos[2] - fClientPos[2]) > 256.0)
-		{
+		if (GetGameTime() < g_fBot_Grenade_NextThrowTime_Molotov)
 			return false;
-		}
-					
+
 		if (IsEntityOnFire(iTarget))
-		{
 			return false;
-		}
 
-		if (GetVectorDistance(fClientPos, fThrowPos, true) <= BOT_GRENADE_CHECK_RADIUS_SQR)
-		{
+		if (GetVectorDistance(g_fClientAbsOrigin[iClient], fThrowPos, true) <= BOT_GRENADE_CHECK_RADIUS_SQR)
 			return false;
-		}
 
 		if (IsFinaleEscapeVehicleArrived())
+			return false;
+	}
+	else
+	{
+		if (GetGameTime() < g_fBot_Grenade_NextThrowTime)
+			return false;
+
+		if (iGrenadeType == 1 && !g_bCvar_Nightmare)
 		{
-			return false;
+			if (bIsThrowTargetTank)
+				return false;
+
+			for (int i = 1; i <= MaxClients; i++)
+			{
+				if (IsClientSurvivor(i) && L4D_IsPlayerBoomerBiled(i))
+					return false;
+			}
 		}
-	}
-	else if (GetGameTime() < g_fSurvivorBot_Grenade_NextThrowTime)
-	{
-		return false;
-	}
-
-	if (GetPinnedSurvivorCount() != 0)
-		return false;
-
-	int iActiveGrenades = (GetSurvivorTeamActiveItemCount(L4D2WeaponId_PipeBomb) + GetSurvivorTeamActiveItemCount(L4D2WeaponId_Molotov) + GetSurvivorTeamActiveItemCount(L4D2WeaponId_Vomitjar));
-	if (iActiveGrenades >= 1)
-		return false;
-
-	if (bIsThrowTargetTank == true)
-	{
-		if (iGrenadeType == 1)
-			return false;
-
-		if (iGrenadeType == 3)
+		else if (iGrenadeType == 3 && bIsThrowTargetTank)
 		{
 			if (GetGameTime() <= g_fInfectedBot_CoveredInVomitTime[iTarget])
 				return false;
@@ -3018,123 +3717,115 @@ bool CheckCanThrowGrenade(int iClient, int iTarget, float fClientPos[3], float f
 			if (GetInfectedCount(iTarget, g_fCvar_ChaseBileRange, 10, _, false) < 10)
 				return false;
 		}
-
-		if (!IsVisibleEntity(iClient, iTarget, MASK_SHOT_HULL))
-			return false;
 	}
-	else
-	{
-		if (iGrenadeType == 2)
-			return false;
 
+	if ((bIsThrowTargetTank || g_bCvar_Nightmare) && !IsVisibleEntity(iClient, iTarget, MASK_SHOT_HULL))
+		return true;
+
+	if (!bIsThrowTargetTank)
+	{
 		int iThrowCount = CalculateGrenadeThrowInfectedCount();		
-		if (g_iSurvivorBot_GrenadeInfectedCount[iClient] < iThrowCount)
-		{
+		if (g_iBot_GrenadeInfectedCount[iClient] < iThrowCount)
 			return false;
-		}
 
 		int iChaseEnt = INVALID_ENT_REFERENCE;
 		float fItRange = (g_fCvar_ChaseBileRange*g_fCvar_ChaseBileRange);
 		while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "info_goal_infected_chase")) != INVALID_ENT_REFERENCE)
 		{
-			if (GetEntityDistance(iChaseEnt, iTarget, true) > fItRange)continue;
-			return false;
+			if (GetEntityDistance(iChaseEnt, iTarget, true) <= fItRange)
+				return false;
 		}
 
 		iChaseEnt = INVALID_ENT_REFERENCE;
 		while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "pipe_bomb_projectile")) != INVALID_ENT_REFERENCE)
 		{
-			if (GetEntityDistance(iChaseEnt, iTarget, true) > 1048576.0)continue;
-			return false;
+			if (GetEntityDistance(iChaseEnt, iTarget, true) <= 1048576.0) // 1024
+				return false;
 		}
 	}
 
-	if (iGrenadeType == 1)
-	{
-		for (int i = 1; i <= MaxClients; i++)
-		{
-			if (!IsClientSurvivor(i) || !L4D_IsPlayerBoomerBiled(i))continue;
-			return false;
-		}
-	}
+	int iActiveGrenades = (
+		GetTeamActiveItemCount(L4D2WeaponId_PipeBomb) + 
+		GetTeamActiveItemCount(L4D2WeaponId_Molotov) + 
+		GetTeamActiveItemCount(L4D2WeaponId_Vomitjar)
+	);
+	if (iActiveGrenades > 0)
+		return false;
 
 	return true;
 }
 
-bool CheckIsUnableToThrowGrenade(int iClient, int iTarget, float fClientPos[3], float fThrowPos[3], bool bTeammateNearThrowArea, bool bIsThrowTargetTank)
+bool CheckIsUnableToThrowGrenade(int iClient, int iTarget, int iGrenadeType, float fThrowPos[3], bool bIsThrowTargetTank)
 {
-	int iActiveGrenades = (GetSurvivorTeamActiveItemCount(L4D2WeaponId_PipeBomb) + GetSurvivorTeamActiveItemCount(L4D2WeaponId_Molotov) + GetSurvivorTeamActiveItemCount(L4D2WeaponId_Vomitjar));
-	if (iActiveGrenades > 1)
-		return true;
-
-	int iGrenadeType = SurvivorHasGrenade(iClient);
-	if (iGrenadeType == 2)
+	if (iGrenadeType == 1 && !g_bCvar_Nightmare)
 	{
-		if (bTeammateNearThrowArea)
+		if (bIsThrowTargetTank)
 			return true;
 
-		if ((fThrowPos[2] - fClientPos[2]) > 256.0)
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (IsClientSurvivor(i) && L4D_IsPlayerBoomerBiled(i))
+				return true;
+		}
+	}
+	else if (iGrenadeType == 2)
+	{
+		if (!bIsThrowTargetTank && !g_bCvar_Nightmare)
 			return true;
 
-		if (GetVectorDistance(fClientPos, fThrowPos, true) <= BOT_GRENADE_CHECK_RADIUS_SQR)
+		if (g_bBot_IsFriendNearThrowArea[iClient])
 			return true;
-					
+
+		if ((fThrowPos[2] - g_fClientAbsOrigin[iClient][2]) > 256.0)
+			return true;
+
 		if (IsEntityOnFire(iTarget))
 			return true;
-	}
 
-	if (bIsThrowTargetTank)
-	{
-		if (iGrenadeType == 1)
-			return true;
-
-		if (iGrenadeType == 3)
-		{
-			if (GetGameTime() <= g_fInfectedBot_CoveredInVomitTime[iTarget])
-				return true;
-
-			if (GetInfectedCount(iTarget, g_fCvar_ChaseBileRange, 10, _, false) < 10)
-				return true;
-		}
-
-		if (!IsVisibleEntity(iClient, iTarget, MASK_SHOT_HULL))
+		if (GetVectorDistance(g_fClientAbsOrigin[iClient], fThrowPos, true) <= BOT_GRENADE_CHECK_RADIUS_SQR)
 			return true;
 	}
-	else
+	else if (iGrenadeType == 3)
 	{
-		if (iGrenadeType == 2)
+		if (GetGameTime() <= g_fInfectedBot_CoveredInVomitTime[iTarget])
 			return true;
 
+		if (GetInfectedCount(iTarget, g_fCvar_ChaseBileRange, 10, _, false) < 10)
+			return true;
+	}
+
+	if ((bIsThrowTargetTank || g_bCvar_Nightmare) && !IsVisibleEntity(iClient, iTarget, MASK_SHOT_HULL))
+		return true;
+	
+	if (!bIsThrowTargetTank)
+	{
 		int iThrowCount = CalculateGrenadeThrowInfectedCount();
-		if (g_iSurvivorBot_GrenadeInfectedCount[iClient] < RoundFloat(iThrowCount * 0.33))
-		{
+		if (g_iBot_GrenadeInfectedCount[iClient] < RoundFloat(iThrowCount * 0.33))
 			return true;
-		}
 
 		int iChaseEnt = INVALID_ENT_REFERENCE;
 		float fItRange = (g_fCvar_ChaseBileRange*g_fCvar_ChaseBileRange);
 		while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "info_goal_infected_chase")) != INVALID_ENT_REFERENCE)
 		{
-			if (GetEntityDistance(iChaseEnt, iTarget, true) > fItRange)continue;
-			return true;
+			if (GetEntityDistance(iChaseEnt, iTarget, true) <= fItRange)
+				return true;
 		}
 
 		iChaseEnt = INVALID_ENT_REFERENCE;
 		while ((iChaseEnt = FindEntityByClassname(iChaseEnt, "pipe_bomb_projectile")) != INVALID_ENT_REFERENCE)
 		{
-			if (GetEntityDistance(iChaseEnt, iTarget, true) > 1048576.0)continue;
-			return true;
+			if (GetEntityDistance(iChaseEnt, iTarget, true) <= 1048576.0) // 1024
+				return true;
 		}
 	}
 
-	if (iGrenadeType == 1)
-	{
-		for (int i = 1; i <= MaxClients; i++)
-		{
-			if (!IsClientSurvivor(i) || !L4D_IsPlayerBoomerBiled(i))continue;
-			return true;
-		}
-	}
+	int iActiveGrenades = (
+		GetTeamActiveItemCount(L4D2WeaponId_PipeBomb) + 
+		GetTeamActiveItemCount(L4D2WeaponId_Molotov) + 
+		GetTeamActiveItemCount(L4D2WeaponId_Vomitjar)
+	);
+	if (iActiveGrenades > 1)
+		return true;
 
 	return false;
 }
@@ -3189,71 +3880,51 @@ float GetClientMaxSpeed(int iClient)
 	return (GetEntPropFloat(iClient, Prop_Send, "m_flMaxspeed") * GetEntPropFloat(iClient, Prop_Data, "m_flLaggedMovementValue"));
 }
 
-static const char g_sSemiAutoWeapons[][] = 
-{
-	"pistol",
-	"pistol_magnum",
-	"pumpshotgun",
-	"shotgun_chrome",
-	"autoshotgun",
-	"shotgun_spas",
-	"hunting_rifle",
-	"sniper_military",
-	"sniper_scout",
-	"sniper_awp",
-	"grenade_launcher",
-	"pain_pills",
-	"adrenaline",
-	"pipe_bomb",
-	"molotov",
-	"vomitjar"
-};
 bool PressAttackButton(int iClient, int &buttons, float fFireRate = -1.0)
 {
 	if (g_bClient_IsFiringWeapon[iClient])
 		return false;
-
-	int iWeapon = L4D_GetPlayerCurrentWeapon(iClient);
+	
+	static int iWeapon, iPistol;
+	static float fClampDist, fCycleTime, fNextFireT, fAimPos[3];
+	static L4D2WeaponId iWeaponID;
+	iWeapon = L4D_GetPlayerCurrentWeapon(iClient);
 	if (iWeapon == -1)return false;
 
-	if (IsFakeClient(iClient) && (g_bCvar_BotsDontShoot || g_bSurvivorBot_PreventFire[iClient]))
+	if (IsFakeClient(iClient) && (g_bCvar_BotsDontShoot || g_bBot_PreventFire[iClient]))
 		return false;
 
-	static char sClassname[64];
-	GetEdictClassname(iWeapon, sClassname, sizeof(sClassname));
-
-	float fNextFireT = fFireRate;
-	int bIsPistol = (strcmp(sClassname[7], "pistol") == 0 ? 1 : (strcmp(sClassname[7], "pistol_magnum") == 0 ? 2 : 0));
-	if (fNextFireT <= 0.0 && (bIsPistol != 0 || GetWeaponTier(iWeapon) > 0))
+	iWeaponID = view_as<L4D2WeaponId>(g_iWeaponID[iWeapon]);
+	fNextFireT = fFireRate;
+	iPistol = (iWeaponID == L4D2WeaponId_Pistol ? 1 : iWeaponID == L4D2WeaponId_PistolMagnum ? 2 : 0);
+	if (fNextFireT <= 0.0 && (iPistol != 0 || GetWeaponTier(iWeapon) > 0))
 	{
-		float fCycleTime = GetWeaponCycleTime(iWeapon);
-		float fAimPos[3]; GetClientAimPosition(iClient, fAimPos);
+		fCycleTime = GetWeaponCycleTime(iWeapon);
+		if (iPistol == 1 && g_iClientInvFlags[iClient] & FLAG_PISTOL_EXTRA)
+			fCycleTime *= 2.5;
+		GetClientAimPosition(iClient, fAimPos);
 
-		float fClampDist = 2048.0;
-		if (bIsPistol == 2)fClampDist *= 0.5;
-		else if (GetEntProp(iWeapon, Prop_Send, "m_upgradeBitVec") & L4D2_WEPUPGFLAG_LASER)fClampDist *= 2.0;
+		fClampDist = 1800.0;
+		if (iPistol == 2)
+			fClampDist *= 0.5;
+		else if (GetEntProp(iWeapon, Prop_Send, "m_upgradeBitVec") & L4D2_WEPUPGFLAG_LASER)
+			fClampDist *= 2.0;
 
 		fNextFireT = (fCycleTime * (GetVectorDistance(g_fClientEyePos[iClient], fAimPos) / fClampDist));
 	}
 
 	if (fNextFireT < GetGameFrameTime())
 	{
-		for (int i = 0; i < sizeof(g_sSemiAutoWeapons); i++)
-		{
-			if (strcmp(sClassname[7], g_sSemiAutoWeapons[i]) == 0)
-			{
-				fNextFireT = GetGameFrameTime();
-				break;
-			}
-		}
+		if (g_bIsSemiAuto[iWeaponID])
+			fNextFireT = GetGameFrameTime();
 	}
 
-	if (fNextFireT <= 0.0 || GetGameTime() > g_fSurvivorBot_NextPressAttackTime[iClient])
+	if (fNextFireT <= 0.0 || GetGameTime() > g_fBot_NextPressAttackTime[iClient])
 	{
-		if (GetWeaponClip1(iWeapon) > 0)g_fSurvivorBot_BlockWeaponReloadTime[iClient] = GetGameTime() + 2.0;
+		if (GetWeaponClip1(iWeapon) > 0)g_fBot_BlockWeaponReloadTime[iClient] = GetGameTime() + 2.0;
 		buttons |= IN_ATTACK;
 		g_bClient_IsFiringWeapon[iClient] = true;
-		g_fSurvivorBot_NextPressAttackTime[iClient] = GetGameTime() + fNextFireT;
+		g_fBot_NextPressAttackTime[iClient] = GetGameTime() + fNextFireT;
 		return true;
 	}
 	return false;
@@ -3267,8 +3938,8 @@ int GetWeaponAmmoType(int iWeapon)
 
 int GetClientPrimaryAmmo(int iClient)
 {	
-	int iPrimaryWeapon = GetClientWeaponInventory(iClient, 0);
-	if (iPrimaryWeapon == -1)return -1;
+	int iPrimaryWeapon = GetWeaponInInventory(iClient, 0);
+	if (!iPrimaryWeapon)return -1;
 
 	int iAmmoType = GetWeaponAmmoType(iPrimaryWeapon);
 	if (iAmmoType == -1)return -1;
@@ -3278,8 +3949,8 @@ int GetClientPrimaryAmmo(int iClient)
 
 public Action L4D_OnVomitedUpon(int victim, int &attacker, bool &boomerExplosion)
 {
-	if (IsFakeClient(victim) && GetGameTime() >= g_fSurvivorBot_VomitBlindedTime[victim])
-		g_fSurvivorBot_VomitBlindedTime[victim] = GetGameTime() + g_fCvar_BotsVomitBlindTime;
+	if (IsFakeClient(victim) && GetGameTime() >= g_fBot_VomitBlindedTime[victim])
+		g_fBot_VomitBlindedTime[victim] = GetGameTime() + g_fCvar_BotsVomitBlindTime;
 
 	return Plugin_Continue;
 }
@@ -3299,96 +3970,170 @@ bool L4D_IsPlayerBoomerBiled(int iClient)
 	return (GetGameTime() <= GetEntPropFloat(iClient, Prop_Send, "m_itTimer", 1));
 }
 
-bool L4D2_IsUnderAdrenalineEffect(int iClient)
+bool BotShouldScavengeItem(int iClient, int iItem, int iItemTier, int iScavengeItem, int iPrimarySlot)
 {
-	return (!!GetEntProp(iClient, Prop_Send, "m_bAdrenalineActive"));
+	static int iTier3Primary, iSecondarySlot, iItemFlags, iWpnTier, iBotPreference;
+	iItemFlags = g_iItemFlags[iItem];
+
+	if (g_bCvar_SwitchOffCSSWeapons && iItemFlags & FLAG_CSS)
+		return false;
+
+	if (iPrimarySlot)
+	{
+		if (iItemTier > 0 && L4D_IsValidEnt(iScavengeItem) && (g_iWeaponID[iScavengeItem] == 54 || GetWeaponTier(iScavengeItem) > 0) ) // L4D2WeaponId_Ammo = 54
+			return false;
+
+		iWpnTier = GetWeaponTier(iPrimarySlot);
+		iBotPreference = GetBotWeaponPreference(iClient);
+		iTier3Primary = SurvivorHasTier3Weapon(iClient);
+
+		if (iBotPreference != 0)
+		{
+			if ( !iTier3Primary && (iWpnTier == 2 || iWpnTier == 1 && iBotPreference == L4D_WEAPON_PREFERENCE_SMG) && WeaponHasEnoughAmmo(iPrimarySlot))
+			{
+				if (iBotPreference != L4D_WEAPON_PREFERENCE_ASSAULTRIFLE && iItemFlags & FLAG_ASSAULT)
+					return false;
+				if (iBotPreference != L4D_WEAPON_PREFERENCE_SHOTGUN && iItemFlags & FLAG_SHOTGUN && iItemFlags & FLAG_TIER2)
+					return false;
+				if (iBotPreference != L4D_WEAPON_PREFERENCE_SNIPERRIFLE && iItemFlags & FLAG_SNIPER)
+					return false;
+			}
+		}
+
+		//if(g_bCvar_Debug)
+		//	PrintToServer("WeaponHasEnoughAmmo %b ItemTier %d", WeaponHasEnoughAmmo(iPrimarySlot), iItemTier);
+
+		if (iItemTier > 0 && WeaponHasEnoughAmmo(iPrimarySlot)
+			&& (iTier3Primary == 1 && GetSurvivorTeamInventoryCount(FLAG_GL) <= g_iCvar_MaxWeaponTier3_GLauncher
+			|| iTier3Primary == 2 && GetSurvivorTeamInventoryCount(FLAG_M60) <= g_iCvar_MaxWeaponTier3_M60) )
+			return false;
+
+		if (g_bCvar_Nightmare && iItemFlags & FLAG_AMMO)
+		{
+			bool bHumanUsedAmmo = true;
+			for (int i = 1; i <= MaxClients; i++)
+			{
+				if (i == iClient || !IsClientSurvivor(i) || IsFakeClient(i) || !GetWeaponInInventory(i, 0))
+					continue;
+
+				if (!(g_iItem_Used[iItem] & (1 << (iClient - 1))) && GetSpawnerItemCount(iItem) <= 4)
+				{
+					bHumanUsedAmmo = false;
+					break;
+				}
+			}
+			
+			// if nightmare, don't refill and use up ammopile until human players do
+			if (!bHumanUsedAmmo)return false;
+		}
+
+		if (iItemTier != 0 && GetClientPrimaryAmmo(iClient) < g_iWeapon_MaxAmmo[iPrimarySlot])
+		{
+			int iAmmoPileItem = GetItemFromArray(g_hAmmopileList, iClient, 1024.0, _, _, _, false);
+			if (iAmmoPileItem)return false;
+		}
+	}
+	else if (g_bCvar_Nightmare && iItemTier > 0)
+	{
+		bool bHumanHasNoWpn = false;
+		for (int i = 1; i <= MaxClients; i++)
+		{
+			if (i == iClient || !IsClientSurvivor(i) || IsFakeClient(i))
+				continue;
+
+			if (!GetWeaponInInventory(i, 0))
+			{
+				bHumanHasNoWpn = true;
+				break;
+			}
+		}
+
+		// if nightmare, don't pickup any primary weapons until human players do
+		if (bHumanHasNoWpn)return false;	
+	}
+
+	iSecondarySlot = GetWeaponInInventory(iClient, 1);
+	if (iSecondarySlot)
+	{
+		// if i have magnum and prefer it to pistol
+		if (g_bCvar_BotWeaponPreference_ForceMagnum && iItemFlags & FLAG_PISTOL && SurvivorHasPistol(iClient) == 3)
+			return false;
+
+		// if it's melee AND i don't have melee AND team has enough melee OR i have chainsaw AND not too many chainsaw/melee in team
+		if (iItemFlags & FLAG_MELEE && (g_iClientInvFlags[iClient] & FLAG_MELEE && (GetSurvivorTeamInventoryCount(FLAG_MELEE) >= g_iCvar_MaxMeleeSurvivors)
+			|| g_iClientInvFlags[iClient] & FLAG_CHAINSAW && GetSurvivorTeamInventoryCount(FLAG_CHAINSAW) <= g_iCvar_ImprovedMelee_ChainsawLimit))
+			return false;
+
+		// if it's pistols AND i have chainsaw AND it has fuel AND not too many chainsaw in team
+		if (iItemFlags & (FLAG_PISTOL | FLAG_PISTOL_EXTRA) && g_iClientInvFlags[iClient] & FLAG_CHAINSAW
+			&& g_iWeapon_Clip1[iSecondarySlot] > RoundFloat(GetWeaponMaxAmmo(iSecondarySlot) * 0.25)
+			&& GetSurvivorTeamInventoryCount(FLAG_CHAINSAW) <= g_iCvar_ImprovedMelee_ChainsawLimit
+		)
+			return false;
+	}
+
+	if (iItemFlags & (FLAG_MEDKIT | FLAG_DEFIB) && g_iClientInvFlags[iClient] & FLAG_UPGRADE && IsWeaponSlotActive(iClient, 3))
+		return false;
+
+	if (g_iBot_DefibTarget[iClient] && iItemFlags & FLAG_MEDKIT && g_iClientInvFlags[iClient] & FLAG_DEFIB )
+		return false;
+
+	return true;
 }
 
 public Action L4D2_OnFindScavengeItem(int iClient, int &iItem)
 {
-	if (!IsEntityExists(iItem))
+	if (iItem <= 0)
 		return Plugin_Continue;
+	
+	static int iPrimarySlot, iPrimaryAmmo, iItemTier, iScavengeItem;
+	static char szWeaponName[64];
 
-	char sItemClass[64]; 
-	GetWeaponClassname(iItem, sItemClass, sizeof(sItemClass));
+	iPrimarySlot = GetWeaponInInventory(iClient, 0);	
+	iPrimaryAmmo = 0;
+	iScavengeItem = g_iBot_ScavengeItem[iClient];
+	iItemTier = GetWeaponTier(iItem);
+	GetEdictClassname(iItem, szWeaponName, sizeof(szWeaponName));
 
-	int iPrimarySlot = GetClientWeaponInventory(iClient, 0);
-	if (IsEntityExists(iPrimarySlot))
+	if ((g_iWeaponID[iItem] <= 0 || iItemTier == -1) && !strcmp(szWeaponName, "weapon_spawn"))
 	{
-		int iWpnTier = GetWeaponTier(iPrimarySlot);
+		static float fItemPos[3];
+		GetEntityAbsOrigin(iItem, fItemPos);
 
-		int iBotPreference = GetSurvivorBotWeaponPreference(iClient);
-		if (iBotPreference != 0)
-		{
-			if ((iWpnTier == 2 || iWpnTier == 1 && iBotPreference == L4D_WEAPON_PREFERENCE_SMG) && WeaponHasEnoughAmmoLeft(iPrimarySlot))
-			{
-				if (iBotPreference != L4D_WEAPON_PREFERENCE_ASSAULTRIFLE && (strcmp(sItemClass[7], "rifle") == 0 || strcmp(sItemClass[7], "rifle_ak47") == 0 || strcmp(sItemClass[7], "rifle_desert") == 0 || strcmp(sItemClass[7], "rifle_sg552") == 0))
-					return Plugin_Handled;
-				if (iBotPreference != L4D_WEAPON_PREFERENCE_SHOTGUN && (strcmp(sItemClass[7], "autoshotgun") == 0 || strcmp(sItemClass[7], "shotgun_spas") == 0))
-					return Plugin_Handled;
-				if (iBotPreference != L4D_WEAPON_PREFERENCE_SNIPERRIFLE && (strcmp(sItemClass[7], "sniper_military") == 0 || strcmp(sItemClass[7], "sniper_awp") == 0 || strcmp(sItemClass[7], "sniper_scout") == 0 || strcmp(sItemClass[7], "hunting_rifle") == 0))
-					return Plugin_Handled;
-			}
-		}
-
-		int iItemTier = GetWeaponTier(iItem);
-		if (iWpnTier == 3) 
-		{
-			if (strcmp(sItemClass[7], "ammo_spawn") == 0)
-				return Plugin_Handled;
-
-			if (iItemTier == 1 || iItemTier == 2) 
-			{
-				if (SurvivorHasTier3Weapon(iClient) == 2)
-				{
-					if (GetWeaponClip1(iPrimarySlot) > RoundFloat(GetWeaponClipSize(iPrimarySlot) * 0.2) && GetSurvivorTeamItemCount(L4D2WeaponId_RifleM60) <= g_iCvar_MaxWeaponTier3_M60)
-					{
-						return Plugin_Handled;
-					}
-				}
-				else if (GetClientPrimaryAmmo(iClient) > RoundFloat(GetWeaponMaxAmmo(iPrimarySlot) * 0.2) && GetSurvivorTeamItemCount(L4D2WeaponId_GrenadeLauncher) <= g_iCvar_MaxWeaponTier3_GLauncher)
-				{
-					return Plugin_Handled;
-				}
-			}
-		}
-		else if (iItemTier != 0 && GetClientPrimaryAmmo(iClient) < GetWeaponMaxAmmo(iPrimarySlot))
-		{
-			int iAmmoPileItem = GetItemFromArrayList(g_hAmmopileList, iClient, 1024.0, _, _, _, false);
-			if (iAmmoPileItem != -1)return Plugin_Handled;
-		}
+		CheckEntityForStuff(iItem, szWeaponName);
+		// PrintToServer("OnFindScavengeItem: %d %s wepid %d tier %d\npos %.2f %.2f %.2f", iItem, szWeaponName, g_iWeaponID[iItem], iItemTier, fItemPos[0], fItemPos[1], fItemPos[2]);
+		return Plugin_Handled;
 	}
 
-	int iSecondarySlot = GetClientWeaponInventory(iClient, 1);
-	if (IsEntityExists(iSecondarySlot))
+	if (g_iCvar_Debug & DEBUG_SCAVENGE && (!g_iCvar_DebugClient || iClient == g_iCvar_DebugClient))
 	{
-		if (g_bCvar_BotWeaponPreference_ForceMagnum && SurvivorHasPistol(iClient) == 3 && strcmp(sItemClass[7], "pistol") == 0)
-			return Plugin_Handled;
+		static char szEntClass[64], szEntClassname[64];		
+		if (iPrimarySlot)
+			strcopy(szEntClass, 64, IBWeaponName[g_iWeaponID[iPrimarySlot]]);
+		if (L4D_IsValidEnt(iScavengeItem))
+			GetEdictClassname(iScavengeItem, szEntClassname, sizeof(szEntClassname));
 
-		if (strcmp(sItemClass[7], "melee") == 0 && (!SurvivorHasMeleeWeapon(iClient) && ((GetSurvivorTeamItemCount(L4D2WeaponId_Chainsaw) + GetSurvivorTeamItemCount(L4D2WeaponId_Melee)) >= g_iCvar_MaxMeleeSurvivors) || SurvivorHasMeleeWeapon(iClient) == 2 && GetSurvivorTeamItemCount(L4D2WeaponId_Chainsaw) <= g_iCvar_ImprovedMelee_ChainsawLimit)) 
-			return Plugin_Handled;
-
-		if ((strcmp(sItemClass[7], "pistol") == 0 || strcmp(sItemClass[7], "pistol_magnum") == 0) && SurvivorHasMeleeWeapon(iClient) == 2 && GetSurvivorTeamItemCount(L4D2WeaponId_Chainsaw) <= g_iCvar_ImprovedMelee_ChainsawLimit && g_iWeapon_Clip1[iSecondarySlot] > RoundFloat(GetWeaponMaxAmmo(iSecondarySlot) * 0.25) && GetSurvivorTeamItemCount(L4D2WeaponId_Melee) <= g_iCvar_MaxMeleeSurvivors)
-			return Plugin_Handled;
+		PrintToServer("OnFindScavengeItem: %N has %s ammo %d, goes for %s weapon ID %d, ScavengeItem %s", iClient, szEntClass, iPrimaryAmmo, szWeaponName, g_iWeaponID[iItem], szEntClassname);
 	}
 
-	if (IsWeaponSlotActive(iClient, 3) && (strcmp(sItemClass[7], "first_aid_kit") == 0 || strcmp(sItemClass[7], "defibrillator") == 0) && SurvivorHasHealthKit(iClient) == 3)
-		return Plugin_Handled;
-
-	if (strcmp(sItemClass[7], "first_aid_kit") == 0 && IsEntityExists(g_iSurvivorBot_DefibTarget[iClient]) && SurvivorHasHealthKit(iClient) == 2)
-		return Plugin_Handled;
+	if (!BotShouldScavengeItem(iClient, iItem, iItemTier, iScavengeItem, iPrimarySlot))
+	{
+		iItem = g_iBot_ScavengeItem[iClient];
+		return (!iItem ? Plugin_Handled : Plugin_Changed);
+	}
 
 	return Plugin_Continue;
 }
 
-bool WeaponHasEnoughAmmoLeft(int iWeapon)
+bool WeaponHasEnoughAmmo(int iWeapon)
 {
-	return (g_iWeapon_MaxAmmo[iWeapon] > 0 && (g_iWeapon_AmmoLeft[iWeapon] + g_iWeapon_Clip1[iWeapon]) >= RoundFloat(g_iWeapon_MaxAmmo[iWeapon] * 0.33));
+	int iMaxAmmo = g_iWeapon_MaxAmmo[iWeapon];
+	return (iMaxAmmo > 0 && (g_iWeapon_AmmoLeft[iWeapon] + g_iWeapon_Clip1[iWeapon]) >= RoundFloat(iMaxAmmo * g_fCvar_HasEnoughAmmoRatio));
 }
 
-bool IsEntityWeapon(int iEntity, bool bNoSpawn = false)
+stock bool IsEntityWeapon(int iEntity, bool bNoSpawn = false)
 {
-	if (!IsEntityExists(iEntity))
+	if (!L4D_IsValidEnt(iEntity))
 		return false;
 
 	char sEntClass[64]; GetWeaponClassname(iEntity, sEntClass, sizeof(sEntClass));
@@ -3401,35 +4146,66 @@ bool IsEntityWeapon(int iEntity, bool bNoSpawn = false)
 
 int CheckForItemsToScavenge(int iClient)
 {
-	int iItem = -1;
-	int iItemBits = g_iCvar_ItemScavenge_Items;
+	static int iItem, iArrayItem, iItemBits, iItemFlags,
+		iPrimarySlot, iTier3Primary, iMinAmmo, iWpnPreference,
+		iSecondarySlot, iMeleeCount, iChainsawCount, iMeleeType, iCurrentMeleePref,
+		iGrenadeSlot, iGrenadeTypeLimit,
+		iMedkitSlot, iPillsSlot;
 
-	int iArrayItem;
 	ArrayList hItemList = new ArrayList();
 
-	int iPrimarySlot = GetClientWeaponInventory(iClient, 0);
-	int iTier3Primary = SurvivorHasTier3Weapon(iClient);
-	int iWpnPreference = GetSurvivorBotWeaponPreference(iClient);
+	iItem = 0;
+	iItemBits = g_iCvar_ItemScavenge_Items;
+	// =========================
 
-	if (iItemBits & (1 << 13) != 0 && iPrimarySlot == -1)
+	iPrimarySlot = GetWeaponInInventory(iClient, 0);	
+	iSecondarySlot = GetWeaponInInventory(iClient, 1);
+	iGrenadeSlot = GetWeaponInInventory(iClient, 2);
+	iMedkitSlot = GetWeaponInInventory(iClient, 3);
+	iPillsSlot = GetWeaponInInventory(iClient, 4);
+	
+	iTier3Primary = SurvivorHasTier3Weapon(iClient);
+	iWpnPreference = GetBotWeaponPreference(iClient);
+
+	if (!iPrimarySlot && iItemBits & PICKUP_PRIMARY)	// if can pick primary AND no primary
 	{
-		iArrayItem = GetItemFromArrayList(g_hAssaultRifleList, iClient);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+		bool bHumanHasNoWpn = false;
+		// if nightmare, don't pickup any primary weapons until human players do
+		if (g_bCvar_Nightmare)
+		{
+			for (int i = 1; i <= MaxClients; i++)
+			{
+				if (i == iClient || !IsClientSurvivor(i) || IsFakeClient(i))
+					continue;
 
-		iArrayItem = GetItemFromArrayList(g_hShotgunT2List, iClient);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+				if (!GetWeaponInInventory(i, 0))
+				{
+					bHumanHasNoWpn = true;
+					break;
+				}
+			}
+		}
 
-		iArrayItem = GetItemFromArrayList(g_hSniperRifleList, iClient);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+		if (!bHumanHasNoWpn)
+		{
+			if ((iArrayItem = GetItemFromArray(g_hAssaultRifleList, iClient)))
+				hItemList.Push(iArrayItem);
 
-		iArrayItem = GetItemFromArrayList(g_hShotgunT1List, iClient);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+			if ((iArrayItem = GetItemFromArray(g_hShotgunT2List, iClient)))
+				hItemList.Push(iArrayItem);
 
-		iArrayItem = GetItemFromArrayList(g_hSMGList, iClient);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+			if ((iArrayItem = GetItemFromArray(g_hSniperRifleList, iClient)))
+				hItemList.Push(iArrayItem);
+
+			if ((iArrayItem = GetItemFromArray(g_hShotgunT1List, iClient)))
+				hItemList.Push(iArrayItem);
+
+			if ((iArrayItem = GetItemFromArray(g_hSMGList, iClient)))
+				hItemList.Push(iArrayItem);
+		}
 	}
 
-	if (iWpnPreference != 0 && iWpnPreference != L4D_WEAPON_PREFERENCE_SECONDARY && iTier3Primary == 0)
+	if (!iTier3Primary && iWpnPreference != L4D_WEAPON_PREFERENCE_SECONDARY)
 	{
 		ArrayList hWeaponList;
 		bool bHasWep = false;
@@ -3444,12 +4220,12 @@ int CheckForItemsToScavenge(int iClient)
 			case L4D_WEAPON_PREFERENCE_SHOTGUN:
 			{
 				hWeaponList = g_hShotgunT2List;
-				bHasWep = SurvivorHasShotgun(iClient) > 0;
+				bHasWep = (SurvivorHasShotgun(iClient) > 1);
 			}
 			case L4D_WEAPON_PREFERENCE_SNIPERRIFLE:
 			{
 				hWeaponList = g_hSniperRifleList;
-				bHasWep = SurvivorHasSniperRifle(iClient) > 0;
+				bHasWep = SurvivorHasSniperRifle(iClient);
 			}
 			case L4D_WEAPON_PREFERENCE_SMG:
 			{
@@ -3458,286 +4234,266 @@ int CheckForItemsToScavenge(int iClient)
 			}
 		}
 
-		if (!bHasWep && iItemBits & (1 << 13) != 0 || GetWeaponTier(iPrimarySlot) == 1 && iWpnPreference != L4D_WEAPON_PREFERENCE_SMG)
+		if (!bHasWep && iItemBits & PICKUP_PRIMARY || GetWeaponTier(iPrimarySlot) == 1 && iWpnPreference != L4D_WEAPON_PREFERENCE_SMG)
 		{
-			iArrayItem = GetItemFromArrayList(hWeaponList, iClient);
-			if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
-			{
+			iArrayItem = GetItemFromArray(hWeaponList, iClient);
+			if (iArrayItem && (IsNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmo(iArrayItem)))
 				hItemList.Push(iArrayItem);
-			}
+		}
+
+		if (GetSurvivorTeamInventoryCount(FLAG_GL) < g_iCvar_MaxWeaponTier3_GLauncher)
+		{
+			if ((iArrayItem = GetItemFromArray(g_hTier3List, iClient, _, 21))) // L4D2WeaponId_GrenadeLauncher
+				hItemList.Push(iArrayItem);
+		}
+
+		if (GetSurvivorTeamInventoryCount(FLAG_M60) < g_iCvar_MaxWeaponTier3_M60)
+		{
+			if ((iArrayItem = GetItemFromArray(g_hTier3List, iClient, _, 37))) // L4D2WeaponId_RifleM60
+				hItemList.Push(iArrayItem);
 		}
 	}
 
-	if (iWpnPreference != L4D_WEAPON_PREFERENCE_SECONDARY)
+	if (!iMedkitSlot)
 	{
-		if (iTier3Primary != 1 && GetSurvivorTeamItemCount(L4D2WeaponId_GrenadeLauncher) < g_iCvar_MaxWeaponTier3_GLauncher)
-		{
-			iArrayItem = GetItemFromArrayList(g_hTier3List, iClient, _, "weapon_grenade_launcher");
-			if (iArrayItem != -1)
-			{
-				hItemList.Push(iArrayItem);
-			}
-		}
+		if (iItemBits & PICKUP_MEDKIT && (iArrayItem = GetItemFromArray(g_hFirstAidKitList, iClient)))
+			hItemList.Push(iArrayItem);
 
-		if (iTier3Primary != 2 && GetSurvivorTeamItemCount(L4D2WeaponId_RifleM60) < g_iCvar_MaxWeaponTier3_M60)
-		{
-			iArrayItem = GetItemFromArrayList(g_hTier3List, iClient, _, "weapon_rifle_m60");
-			if (iArrayItem != -1)
-			{
-				hItemList.Push(iArrayItem);
-			}
-		}
+		if (iItemBits & PICKUP_UPGRADE && (iArrayItem = GetItemFromArray(g_hUpgradePackList, iClient)))
+			hItemList.Push(iArrayItem);
+	}
+	if (!iMedkitSlot && iItemBits & PICKUP_DEFIB || g_iBot_DefibTarget[iClient] && !(g_iClientInvFlags[iClient] & FLAG_DEFIB))
+	{
+		if ((iArrayItem = GetItemFromArray(g_hDefibrillatorList, iClient)))
+			hItemList.Push(iArrayItem);
 	}
 
-	if (iItemBits & (1 << 4) != 0 && GetClientWeaponInventory(iClient, 3) == -1 || IsEntityExists(g_iSurvivorBot_DefibTarget[iClient]) && SurvivorHasHealthKit(iClient) != 2)
+	if (!iPillsSlot)
 	{
-		iArrayItem = GetItemFromArrayList(g_hDefibrillatorList, iClient);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+		if (iItemBits & PICKUP_PILLS && (iArrayItem = GetItemFromArray(g_hPainPillsList, iClient)))
+			hItemList.Push(iArrayItem);
+
+		if (iItemBits & PICKUP_ADREN && (iArrayItem = GetItemFromArray(g_hAdrenalineList, iClient)))
+			hItemList.Push(iArrayItem);
 	}
 
-	if (GetClientWeaponInventory(iClient, 3) == -1)
+	if (!iGrenadeSlot)
 	{
-		iArrayItem = (iItemBits & (1 << 3) == 0 ? -1 : GetItemFromArrayList(g_hFirstAidKitList, iClient));
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+		if (iItemBits & PICKUP_PIPE && (iArrayItem = GetItemFromArray(g_hGrenadeList, iClient, _, 14)))
+			hItemList.Push(iArrayItem);
 
-		iArrayItem = (iItemBits & (1 << 5) == 0 ? -1 : GetItemFromArrayList(g_hUpgradePackList, iClient));
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
-	}
+		if (iItemBits & PICKUP_MOLO && (iArrayItem = GetItemFromArray(g_hGrenadeList, iClient, _, 13)))
+			hItemList.Push(iArrayItem);
 
-	if (GetClientWeaponInventory(iClient, 4) == -1)
-	{
-		iArrayItem = (iItemBits & (1 << 6) == 0 ? -1 : GetItemFromArrayList(g_hPainPillsList, iClient));
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
-
-		iArrayItem = (iItemBits & (1 << 7) == 0 ? -1 : GetItemFromArrayList(g_hAdrenalineList, iClient));
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
-	}
-
-	int iGrenadeSlot = GetClientWeaponInventory(iClient, 2);
-	if (iGrenadeSlot == -1)
-	{
-		iArrayItem = ((iItemBits & (1 << 0) != 0) ? GetItemFromArrayList(g_hGrenadeList, iClient, _, "weapon_pipe_bomb") : -1);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
-
-		iArrayItem = ((iItemBits & (1 << 1) != 0) ? GetItemFromArrayList(g_hGrenadeList, iClient, _, "weapon_molotov") : -1);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
-
-		iArrayItem = ((iItemBits & (1 << 2) != 0) ? GetItemFromArrayList(g_hGrenadeList, iClient, _, "weapon_vomitjar") : -1);
-		if (iArrayItem != -1)hItemList.Push(iArrayItem);
+		if (iItemBits & PICKUP_BILE && (iArrayItem = GetItemFromArray(g_hGrenadeList, iClient, _, 25)))
+			hItemList.Push(iArrayItem);
 	}
 	else if (g_bCvar_SwapSameTypeGrenades)
-	{	
-		static char sGrenadeSlot[64]; 
-		GetEdictClassname(iGrenadeSlot, sGrenadeSlot, sizeof(sGrenadeSlot));
-
-		static char sAvoidGrenade[64];
-		FormatEx(sAvoidGrenade, sizeof(sAvoidGrenade), "!!%s", sGrenadeSlot);
-
-		int iGrenadeTypeLimit = RoundFloat((GetSurvivorTeamItemCount(L4D2WeaponId_PipeBomb) + GetSurvivorTeamItemCount(L4D2WeaponId_Molotov) + GetSurvivorTeamItemCount(L4D2WeaponId_Vomitjar)) * 0.55);
+	{
+		iGrenadeTypeLimit = RoundFloat(GetSurvivorTeamInventoryCount(FLAG_GREN) * 0.55);
 		if (iGrenadeTypeLimit < 1)iGrenadeTypeLimit = 1;
 
-		if (GetSurvivorTeamItemCount(L4D2_GetWeaponId(iGrenadeSlot)) > iGrenadeTypeLimit)
+		if (GetSurvivorTeamItemCount(view_as<L4D2WeaponId>(g_iWeaponID[iGrenadeSlot])) > iGrenadeTypeLimit)
 		{
-			iArrayItem = GetItemFromArrayList(g_hGrenadeList, iClient, _, sAvoidGrenade);
-			if (iArrayItem != -1)hItemList.Push(iArrayItem);
+			if ((iArrayItem = GetItemFromArray(g_hGrenadeList, iClient, _, -g_iWeaponID[iGrenadeSlot])))
+				hItemList.Push(iArrayItem);
 		}
 	}
 
-	if (iPrimarySlot != -1)
+	iMinAmmo = 0;
+	if (iPrimarySlot)
 	{
-		static char sPrimarySlot[64]; 
-		GetEdictClassname(iPrimarySlot, sPrimarySlot, sizeof(sPrimarySlot));
+		iItemFlags = g_iItemFlags[iPrimarySlot];
+		iMinAmmo = GetWeaponMaxAmmo(iPrimarySlot);
 
-		if (iTier3Primary == 0 && iItemBits & (1 << 10) != 0)
+		if (iItemBits & PICKUP_AMMO && (!iTier3Primary || iTier3Primary & g_iCvar_T3_Refill))	// if can pick up ammo
 		{
-			int iPrimaryMaxAmmo = GetWeaponMaxAmmo(iPrimarySlot);
-
-			int iMinAmmo = iPrimaryMaxAmmo;
 			if (!L4D_IsInFirstCheckpoint(iClient))
 				iMinAmmo = RoundFloat(iMinAmmo * ((!LBI_IsSurvivorInCombat(iClient) && !L4D_HasVisibleThreats(iClient)) ? 0.75 : 0.5));
+		
+			//if(g_bCvar_Debug)
+			//{
+			//	char sClientName[128];
+			//	GetClientName(iClient, sClientName, sizeof(sClientName));
+			//	PrintToServer("%s iMinAmmo %d primary ammo %d", sClientName, iMinAmmo, GetClientPrimaryAmmo(iClient));
+			//}
+		
 
-			if (GetClientPrimaryAmmo(iClient) < iMinAmmo)
+			if (GetClientPrimaryAmmo(iClient) < iMinAmmo && (iArrayItem = GetItemFromArray(g_hAmmopileList, iClient)))
 			{
-				iArrayItem = GetItemFromArrayList(g_hAmmopileList, iClient);
-				if (iArrayItem != -1)hItemList.Push(iArrayItem);
-			}
-		}
-
-		if (g_bCvar_SwitchOffCSSWeapons)
-		{
-			if (strcmp(sPrimarySlot[7], "smg_mp5") == 0)
-			{				
-				iArrayItem = GetItemFromArrayList(g_hSMGList, iClient, _, "!!smg_mp5");
-				if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
+				bool bHumanUsedAmmo = true;
+				// if nightmare, don't refill and use up ammopile until human players do
+				if (g_bCvar_Nightmare)
 				{
-					hItemList.Push(iArrayItem);
-				}
-			}
-			else if (strcmp(sPrimarySlot[7], "rifle_sg552") == 0) 
-			{				
-				iArrayItem = GetItemFromArrayList(g_hAssaultRifleList, iClient, _, "!!rifle_sg552");
-				if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
-				{
-					hItemList.Push(iArrayItem);
-				}
-			}
-			else if (strcmp(sPrimarySlot[7], "sniper_scout") == 0 || strcmp(sPrimarySlot[7], "sniper_awp") == 0)
-			{				
-				iArrayItem = GetItemFromArrayList(g_hSniperRifleList, iClient, _, "!!sniper_scout");
-				if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
-				{
-					hItemList.Push(iArrayItem);
-				}
-				else
-				{
-					iArrayItem = GetItemFromArrayList(g_hSniperRifleList, iClient, _, "!!sniper_awp");
-					if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
+					for (int i = 1; i <= MaxClients; i++)
 					{
-						hItemList.Push(iArrayItem);
-					}	
+						if (i == iClient || !IsClientSurvivor(i) || IsFakeClient(i) || !GetWeaponInInventory(i, 0))
+							continue;
+
+						if (!(g_iItem_Used[iItem] & (1 << (iClient - 1))) && GetSpawnerItemCount(iItem) <= 4)
+						{
+							bHumanUsedAmmo = false;
+							break;
+						}
+					}
 				}
+				if (bHumanUsedAmmo)
+					hItemList.Push(iArrayItem);
 			}
 		}
 
-		if (g_bCvar_SwapSameTypePrimaries)
+		if (!iTier3Primary && g_bCvar_SwapSameTypePrimaries)
 		{
 			if (iWpnPreference != L4D_WEAPON_PREFERENCE_SMG)
 			{
-				int iSMGCount = (GetSurvivorTeamItemCount(L4D2WeaponId_Smg) + GetSurvivorTeamItemCount(L4D2WeaponId_SmgSilenced) + GetSurvivorTeamItemCount(L4D2WeaponId_SmgMP5));
-				int iShotgunCount = (GetSurvivorTeamItemCount(L4D2WeaponId_ShotgunChrome) + GetSurvivorTeamItemCount(L4D2WeaponId_Pumpshotgun));
+				int iSMGCount = GetSurvivorTeamInventoryCount(FLAG_SMG);
+				int iShotgunCount = GetSurvivorTeamInventoryCount(FLAG_SHOTGUN, FLAG_TIER1);
 
 				int iTier1Limit = RoundToCeil((iSMGCount + iShotgunCount) * 0.5);
 				if (iTier1Limit < 1)iTier1Limit = 1;
 
-				if (iShotgunCount > iTier1Limit && (strcmp(sPrimarySlot[7], "shotgun_chrome") == 0 || strcmp(sPrimarySlot[7], "pumpshotgun") == 0))
+				if (iShotgunCount > iTier1Limit && iItemFlags & (FLAG_SHOTGUN | FLAG_TIER1))
 				{
-					iArrayItem = GetItemFromArrayList(g_hSMGList, iClient);
-					if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
-					{
+					iArrayItem = GetItemFromArray(g_hSMGList, iClient);
+					if (iArrayItem && (IsNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmo(iArrayItem)))
 						hItemList.Push(iArrayItem);
-					}
 				}
-				else if (iSMGCount > iTier1Limit && (strcmp(sPrimarySlot[7], "smg") == 0 || strcmp(sPrimarySlot[7], "smg_silenced") == 0 || strcmp(sPrimarySlot[7], "smg_mp5") == 0))
+				else if (iSMGCount > iTier1Limit && iItemFlags & FLAG_SMG)
 				{
-					iArrayItem = GetItemFromArrayList(g_hShotgunT1List, iClient);
-					if (iArrayItem != -1 && (IsWeaponNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmoLeft(iArrayItem)))
-					{
+					iArrayItem = GetItemFromArray(g_hShotgunT1List, iClient);
+					if (iArrayItem && (IsNearAmmoPile(iArrayItem, iClient) || WeaponHasEnoughAmmo(iArrayItem)))
 						hItemList.Push(iArrayItem);
-					}
 				}
 			}
-
-			int iPrimaryCount = GetSurvivorTeamItemCount(L4D2_GetWeaponId(iPrimarySlot));
-			static char sAvoidWeapon[64];
-			FormatEx(sAvoidWeapon, sizeof(sAvoidWeapon), "!!%s", sPrimarySlot);
 
 			int iWepLimit = -1;
 			ArrayList hWepArray;
 			if (SurvivorHasShotgun(iClient))
 			{
 				hWepArray = g_hShotgunT2List;
-				iWepLimit = RoundFloat((GetSurvivorTeamItemCount(L4D2WeaponId_Autoshotgun) + GetSurvivorTeamItemCount(L4D2WeaponId_ShotgunSpas)) * 0.5);
+				iWepLimit = RoundFloat(GetSurvivorTeamInventoryCount(FLAG_SHOTGUN, FLAG_TIER2) * 0.5);
 			}
 			else if (SurvivorHasAssaultRifle(iClient))
 			{
 				hWepArray = g_hAssaultRifleList;
-				iWepLimit = RoundFloat((GetSurvivorTeamItemCount(L4D2WeaponId_Rifle) + GetSurvivorTeamItemCount(L4D2WeaponId_RifleAK47) + GetSurvivorTeamItemCount(L4D2WeaponId_RifleDesert) + GetSurvivorTeamItemCount(L4D2WeaponId_RifleSG552)) * 0.5);
+				iWepLimit = RoundFloat(GetSurvivorTeamInventoryCount(FLAG_ASSAULT) * 0.5);
 			}
 			else if (SurvivorHasSniperRifle(iClient))
 			{
 				hWepArray = g_hSniperRifleList;
-				iWepLimit = RoundFloat((GetSurvivorTeamItemCount(L4D2WeaponId_HuntingRifle) + GetSurvivorTeamItemCount(L4D2WeaponId_SniperMilitary) + GetSurvivorTeamItemCount(L4D2WeaponId_SniperScout) + GetSurvivorTeamItemCount(L4D2WeaponId_SniperAWP)) * 0.5);
+				iWepLimit = RoundFloat(GetSurvivorTeamInventoryCount(FLAG_SNIPER) * 0.5);
 			}
-			if (iWepLimit != -1 && iWepLimit < 1)iWepLimit = 1;
 
+			if (iWepLimit != -1 && iWepLimit < 1)
+				iWepLimit = 1;
+
+			int iPrimaryCount = GetSurvivorTeamItemCount(L4D2_GetWeaponId(iPrimarySlot));
 			if (iPrimaryCount > iWepLimit)
 			{
-				iArrayItem = GetItemFromArrayList(hWepArray, iClient, _, sAvoidWeapon);
-				if (iArrayItem != -1 && (WeaponHasEnoughAmmoLeft(iArrayItem) || IsWeaponNearAmmoPile(iArrayItem, iClient)))
-				{
+				iArrayItem = GetItemFromArray(hWepArray, iClient, _, -g_iWeaponID[iPrimarySlot]);
+				if (iArrayItem && (WeaponHasEnoughAmmo(iArrayItem) || IsNearAmmoPile(iArrayItem, iClient)))
 					hItemList.Push(iArrayItem);
-				}
 			}
 		}
 
 		int iUpgradeBits = GetEntProp(iPrimarySlot, Prop_Send, "m_upgradeBitVec");
-		if (!(iUpgradeBits & L4D2_WEPUPGFLAG_LASER) && iItemBits & (1 << 8) != 0)
+		if (iItemBits & PICKUP_LASER && !(iUpgradeBits & L4D2_WEPUPGFLAG_LASER))
 		{
-			iArrayItem = GetItemFromArrayList(g_hLaserSightList, iClient);
-			if (iArrayItem != -1)hItemList.Push(iArrayItem);
+			if ((iArrayItem = GetItemFromArray(g_hLaserSightList, iClient)))
+				hItemList.Push(iArrayItem);
 		}
-		if (iItemBits & (1 << 9) != 0 && !(iUpgradeBits & L4D2_WEPUPGFLAG_INCENDIARY) && !(iUpgradeBits & L4D2_WEPUPGFLAG_EXPLOSIVE))
+		if (iItemBits & PICKUP_AMMOPACK && !(iUpgradeBits & (L4D2_WEPUPGFLAG_INCENDIARY | L4D2_WEPUPGFLAG_EXPLOSIVE)) )
 		{
-			iArrayItem = GetItemFromArrayList(g_hDeployedAmmoPacks, iClient);
-			if (iArrayItem != -1)hItemList.Push(iArrayItem);
+			if ((iArrayItem = GetItemFromArray(g_hDeployedAmmoPacks, iClient)))
+				hItemList.Push(iArrayItem);
 		}
 	}
 
-	int iSecondarySlot = GetClientWeaponInventory(iClient, 1);
-	if (iSecondarySlot != -1)
+	if (iSecondarySlot)
 	{
-		int iMeleeCount = GetSurvivorTeamItemCount(L4D2WeaponId_Melee);
-		int iChainsawCount = GetSurvivorTeamItemCount(L4D2WeaponId_Chainsaw);
-		int iMeleeType = SurvivorHasMeleeWeapon(iClient);
+		iMeleeCount = GetSurvivorTeamInventoryCount(FLAG_MELEE, -FLAG_CHAINSAW);
+		iChainsawCount = GetSurvivorTeamInventoryCount(FLAG_CHAINSAW);
+		iMeleeType = SurvivorHasMeleeWeapon(iClient);
 
+		static bool bFoundMelee;
 		if (iMeleeType != 0)
 		{
+			if (g_iCvar_Debug & DEBUG_WEP_DATA && g_iCvar_Debug & DEBUG_SCAVENGE)
+			{
+				static char szEntClassname[64];
+				GetEdictClassname(iSecondarySlot, szEntClassname, sizeof(szEntClassname));
+				PrintToServer("%N %d %s MeleeID %d", iClient, iSecondarySlot, szEntClassname, g_iMeleeID[iSecondarySlot]);
+			}
+
+			iCurrentMeleePref = (g_iMeleeID[iSecondarySlot] < 0 ? -1 : GetMeleePreference(iSecondarySlot));
+
 			if (iMeleeType != 2)
 			{
-				if (iItemBits & (1 << 11) != 0 && (iMeleeCount + iChainsawCount) <= g_iCvar_MaxMeleeSurvivors && iChainsawCount < g_iCvar_ImprovedMelee_ChainsawLimit)
+				bFoundMelee = false;
+
+				// look for chainsaw
+				if (iChainsawCount < g_iCvar_ImprovedMelee_ChainsawLimit && iItemBits & PICKUP_CHAINSAW)
 				{
-					iArrayItem = GetItemFromArrayList(g_hMeleeList, iClient, _, "weapon_chainsaw");
-					if (iArrayItem != -1 && g_iWeapon_Clip1[iArrayItem] > RoundFloat(GetWeaponMaxAmmo(iArrayItem) * 0.25))
+					iArrayItem = GetItemFromArray(g_hMeleeList, iClient, _, 20); // L4D2WeaponId_Chainsaw
+					if (iArrayItem && g_iWeapon_Clip1[iArrayItem] > RoundFloat(GetWeaponMaxAmmo(iArrayItem) * 0.25))
 					{
+						bFoundMelee = true;
+						hItemList.Push(iArrayItem);
+					}
+				}
+
+				// look for better melee
+				if (!bFoundMelee && iCurrentMeleePref != -1 && iItemBits & PICKUP_SECONDARY)
+				{
+					iArrayItem = GetItemFromArray(g_hMeleeList, iClient, _, 19); // L4D2WeaponId_Melee
+					if (iArrayItem && GetMeleePreference(iArrayItem) > iCurrentMeleePref)
+					{
+						bFoundMelee = true;
 						hItemList.Push(iArrayItem);
 					}
 				}
 			}
-			else if (iChainsawCount > g_iCvar_ImprovedMelee_ChainsawLimit || g_iWeapon_Clip1[iSecondarySlot] <= RoundFloat(GetWeaponMaxAmmo(iSecondarySlot) * 0.25))
+			// drop excess or low fuel chainsaw for other melee/pistols
+			else if (iMeleeType == 2 && (iChainsawCount > g_iCvar_ImprovedMelee_ChainsawLimit || g_iWeapon_Clip1[iSecondarySlot] <= RoundFloat(GetWeaponMaxAmmo(iSecondarySlot) * 0.25)) )
 			{
-				bool bFoundMelee = false;
+				bFoundMelee = false;
 				if (iMeleeCount < g_iCvar_MaxMeleeSurvivors)
 				{
-					iArrayItem = GetItemFromArrayList(g_hMeleeList, iClient, _, "weapon_melee");
-					if (iArrayItem != -1)
+					if ((iArrayItem = GetItemFromArray(g_hMeleeList, iClient, _, 19))) // L4D2WeaponId_Melee
 					{
 						bFoundMelee = true;
 						hItemList.Push(iArrayItem); 
 					}
 				}
-				if (!bFoundMelee)
-				{
-					iArrayItem = GetItemFromArrayList(g_hPistolList, iClient);
-					if (iArrayItem != -1)hItemList.Push(iArrayItem);
-				}
+
+				if (!bFoundMelee && (iArrayItem = GetItemFromArray(g_hPistolList, iClient)))
+					hItemList.Push(iArrayItem);
 			}
 
+			// drop excess melee for any pistol
 			if ((iMeleeCount + iChainsawCount) > g_iCvar_MaxMeleeSurvivors && (iMeleeType != 2 || iChainsawCount > g_iCvar_ImprovedMelee_ChainsawLimit))
 			{
-				iArrayItem = GetItemFromArrayList(g_hPistolList, iClient);
-				if (iArrayItem != -1)hItemList.Push(iArrayItem);
+				if ((iArrayItem = GetItemFromArray(g_hPistolList, iClient)))
+					hItemList.Push(iArrayItem);
 			}
 		}
-		else if (iItemBits & (1 << 12) != 0)
+		else if (iItemBits & PICKUP_SECONDARY)
 		{
-			if ((iMeleeCount + iChainsawCount) < g_iCvar_MaxMeleeSurvivors)
-			{
-				iArrayItem = GetItemFromArrayList(g_hMeleeList, iClient, _, "weapon_melee");
-				if (iArrayItem != -1)hItemList.Push(iArrayItem);
-			}
+			if ((iMeleeCount + iChainsawCount) < g_iCvar_MaxMeleeSurvivors && (iArrayItem = GetItemFromArray(g_hMeleeList, iClient, _, 19))) // L4D2WeaponId_Melee
+				hItemList.Push(iArrayItem);
 
 			int iHasPistol = SurvivorHasPistol(iClient);
-			if (iHasPistol != 0)
+			if (iHasPistol)
 			{
-				if (g_bCvar_BotWeaponPreference_ForceMagnum && iHasPistol != 3)
+				if (g_bCvar_BotWeaponPreference_ForceMagnum && iHasPistol != 3 || GetSurvivorTeamItemCount(L4D2WeaponId_PistolMagnum) == 0)
 				{
-					iArrayItem = GetItemFromArrayList(g_hPistolList, iClient, _, "weapon_pistol_magnum");
-					if (iArrayItem != -1)hItemList.Push(iArrayItem);
+					if ((iArrayItem = GetItemFromArray(g_hPistolList, iClient, _, 32))) // L4D2WeaponId_PistolMagnum
+						hItemList.Push(iArrayItem);
 				}
 				else if (iHasPistol == 1)
 				{
-					iArrayItem = GetItemFromArrayList(g_hPistolList, iClient, _, "weapon_pistol");
-					if (iArrayItem != -1)hItemList.Push(iArrayItem);
+					if ((iArrayItem = GetItemFromArray(g_hPistolList, iClient, _, 1))) // L4D2WeaponId_Pistol
+						hItemList.Push(iArrayItem);
 				} 
 			}
 		}
@@ -3746,26 +4502,37 @@ int CheckForItemsToScavenge(int iClient)
 	if (hItemList.Length > 0)
 	{
 		int iCurItem;
-		float fCurDist;
-		float fLastDist = -1.0;
+		float fCurDist, fLastDist = -1.0;
 		for (int i = 0; i < hItemList.Length; i++)
 		{
 			iCurItem = hItemList.Get(i);
-			fCurDist = GetEntityTravelDistance(iClient, iCurItem, true);
-			if (fLastDist != -1.0 && fCurDist >= fLastDist)continue;
+
+			fCurDist = GetClientDistanceToItem(iClient, iCurItem, true);
+			if (fLastDist != -1.0 && fCurDist >= fLastDist)
+				continue;
 
 			iItem = iCurItem;
 			fLastDist = fCurDist;
 		}
+		g_fBot_ScavengeItemDist[iClient] = fLastDist;
 	}
-
 	delete hItemList;
+
+	if (iItem && g_iCvar_Debug & DEBUG_SCAVENGE && (!g_iCvar_DebugClient || iClient == g_iCvar_DebugClient))
+	{
+		static char szEntClassname[128];		
+		GetEdictClassname(iItem, szEntClassname, sizeof(szEntClassname));
+
+		PrintToServer("CheckForItemsToScavenge: %N MinAmmo %d Ammo %d HasTier3 %d iItem %d %s", iClient,
+		iMinAmmo, GetClientPrimaryAmmo(iClient), iTier3Primary, iItem, szEntClassname);
+	}
+	
 	return iItem;
 }
 
-int GetSurvivorBotWeaponPreference(int iClient)
+int GetBotWeaponPreference(int iClient)
 {
-	switch(GetClientSurvivorType(iClient))
+	switch(GetSurvivorType(iClient))
 	{
 		case L4D_SURVIVOR_ROCHELLE:	return g_iCvar_BotWeaponPreference_Rochelle;
 		case L4D_SURVIVOR_COACH:	return g_iCvar_BotWeaponPreference_Coach;
@@ -3778,71 +4545,71 @@ int GetSurvivorBotWeaponPreference(int iClient)
 	}
 }
 
-int GetPinnedSurvivorCount()
-{
-	int iCount;
-	for (int i = 1; i <= MaxClients; i++)
-	{
-		if (!IsClientSurvivor(i) || !L4D_IsPlayerPinned(i))continue;
-		iCount++;
-	}
-	return iCount;
-}
-
-int ItemSpawnerHasEnoughItems(int iSpawner)
+int GetSpawnerItemCount(int iSpawner)
 {
 	return (!HasEntProp(iSpawner, Prop_Data, "m_itemCount") ? 9999 : GetEntProp(iSpawner, Prop_Data, "m_itemCount"));
 }
 
-bool IsWeaponNearAmmoPile(int iWeapon, int iOwner = -1)
+bool IsNearAmmoPile(int iWeapon, int iOwner = -1)
 {
-	int iAmmoPile = GetItemFromArrayList(g_hAmmopileList, iWeapon, _, _, _, false);
-	return (iAmmoPile != -1 && (iOwner == -1 || LBI_IsReachableEntity(iOwner, iAmmoPile)));
+	int iAmmoPile = GetItemFromArray(g_hAmmopileList, iWeapon, _, _, _, false);
+	return (iAmmoPile && (iOwner == -1 || LBI_IsReachableEntity(iOwner, iAmmoPile)));
 }
 
-int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1.0, const char[] sEntityName = "", const char[] sModelName = "", bool bCheckIsReachable = true, bool bCheckIsVisible = true)
+// 4th argument is now a number instead of a string
+// if number >0, look for a specific weapon ID
+// if number is negative, particular weapon ID is skipped/avoided
+// check for sModelName is never used, let's keep it that way ;)
+int GetItemFromArray(ArrayList hArrayList, int iClient, float fDistance = -1.0, int iWeaponID = 0, const char[] sModelName = "", bool bCheckIsReachable = true, bool bCheckIsVisible = true)
 {
-	if (!hArrayList || hArrayList.Length <= 0)return -1;
+	if (!hArrayList || hArrayList.Length <= 0)return 0;
 	if (fDistance == -1.0)fDistance = g_fCvar_ItemScavenge_ApproachVisibleRange;
 
-	float fClientPos[3];
+	static float fCheckDist, fApproachDist, fCurDist, fPickupRange, fClientPos[3], fEntityPos[3];
+	static int iCloseItem, iEntRef, iEntIndex, iNavArea, iUseCount, iItemFlags;
+	static bool bIsCoop, bInCheckpoint, bInCheckpoint2, bIsTaken, bInUseRange, bValidClient;
+
+ 	//char sWeaponName[MAX_TARGET_LENGTH];
+	static char sEntityModel[PLATFORM_MAX_PATH];
+
 	GetEntityAbsOrigin(iClient, fClientPos);
-
-	int iEntIndex, iNavArea, iUseCount;
-	float fEntityPos[3];
-	float fCheckDist, fCurDist;
-	bool bIsTaken, bInUseRange, bValidClient = IsValidClient(iClient);
-
- 	char sWeaponName[MAX_TARGET_LENGTH];
-	char sEntityModel[PLATFORM_MAX_PATH];
-
-	int iPrimarySlot, iPrimaryTier;
-	float fPickupRange;
-	bool bPrimaryHasAmmo, bIsCoop, bInCheckpoint;
+	bValidClient = IsValidClient(iClient);
 	if (bValidClient)
 	{
-		iPrimarySlot = GetClientWeaponInventory(iClient, 0);
-		if (IsEntityExists(iPrimarySlot))
-		{
-			bPrimaryHasAmmo = WeaponHasEnoughAmmoLeft(iPrimarySlot);
-			iPrimaryTier = GetWeaponTier(iPrimarySlot);
-		}
-
 		bIsCoop = L4D2_IsGenericCooperativeMode(); 
-		bInCheckpoint = LBI_IsPositionInsideCheckpoint(g_fClientAbsOrigin[iClient]);
-		fPickupRange = (g_fCvar_ItemScavenge_PickupRange*g_fCvar_ItemScavenge_PickupRange);
+		bInCheckpoint2 = LBI_IsPositionInsideCheckpoint(g_fClientAbsOrigin[iClient]);
+		fPickupRange = g_fCvar_ItemScavenge_PickupRange_Sqr;
 	}
 
+	iCloseItem = 0;
+	fCheckDist = MAX_MAP_RANGE_SQR;
+
 	for (int i = 0; i < hArrayList.Length; i++)
-	{		
-		iEntIndex = EntRefToEntIndex(hArrayList.Get(i));
+	{
+		iEntRef = hArrayList.Get(i);
+		
+		if (g_hForbiddenItemList.FindValue(iEntRef) != -1)
+		{
+			if (g_iCvar_Debug & DEBUG_SCAVENGE)
+			{
+				iEntIndex = EntRefToEntIndex(iEntRef);
+				PrintToServer("Will not allow snatching %s", IBWeaponName[g_iWeaponID[iEntIndex]]);
+			}
+			continue;
+		}
+		
+		iEntIndex = EntRefToEntIndex(iEntRef);
 		if (iEntIndex == INVALID_ENT_REFERENCE || IsValidClient(GetEntityOwner(iEntIndex)))
 			continue;
+		
+		iItemFlags = g_iItemFlags[iEntIndex];
+		if (g_bCvar_SwitchOffCSSWeapons && iItemFlags & FLAG_CSS)
+			continue;
 
-		iUseCount = ItemSpawnerHasEnoughItems(iEntIndex);
+		iUseCount = GetSpawnerItemCount(iEntIndex);
 		if (iUseCount == 0)continue;
 
-		if (!GetEntityAbsOrigin(iEntIndex, fEntityPos) || GetVectorDistance(fClientPos, fEntityPos, true) > g_fCvar_ItemScavenge_MapSearchRange)
+		if (!GetEntityAbsOrigin(iEntIndex, fEntityPos) || GetVectorDistance(fClientPos, fEntityPos, true) > g_fCvar_ItemScavenge_MapSearchRange_Sqr)
 			continue;
 
 		if (sModelName[0] != 0)
@@ -3850,45 +4617,34 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 			GetEntityModelname(iEntIndex, sEntityModel, sizeof(sEntityModel));
 			if (strcmp(sEntityModel, sModelName, false) != 0)continue;
 		}
-
-		GetEntityClassname(iEntIndex, sWeaponName, sizeof(sWeaponName));
-		if (g_iItem_Used[iEntIndex] & (1 << (iClient - 1)) != 0 && (strcmp(sWeaponName, "upgrade_ammo_explosive") == 0 || strcmp(sWeaponName, "upgrade_ammo_incendiary") == 0) || strcmp(sWeaponName, "prop_dynamic") == 0)
+		
+		//if(g_bCvar_Debug)
+		//	PrintToServer("%s %b",IBWeaponName[g_iWeaponID[iEntIndex]], iItemFlags);
+	
+		//skip if ammo upgrade is already used
+		if (g_iItem_Used[iEntIndex] & (1 << (iClient - 1)) && iItemFlags & FLAG_AMMO && iItemFlags & FLAG_UPGRADE)
+			continue;
+		
+		//skip if weapon ID is avoided
+		if (iWeaponID < 0 && g_iWeaponID[iEntIndex] == -iWeaponID)
+			continue;
+		
+		//skip if WRONG weapon ID
+		if (iWeaponID > 0 && g_iWeaponID[iEntIndex] != iWeaponID)
 			continue;
 
-		GetWeaponClassname(iEntIndex, sWeaponName, sizeof(sWeaponName));
-		if (sEntityName[0] != 0)
-		{
-			if (sEntityName[0] == '!' && sEntityName[1] == '!') 
-			{
-				if (strcmp(sWeaponName, sEntityName[2], false) == 0)
-				{
-					continue;
-				}
-			}
-			else if (strcmp(sWeaponName, sEntityName, false) != 0)
-			{
-				continue;
-			}
-		}
-		
-		fCheckDist = fDistance; 
+		fApproachDist = fDistance; 
 		if (bValidClient)
 		{
-			if (g_bCvar_SwitchOffCSSWeapons && iPrimarySlot != -1 && bPrimaryHasAmmo && (iPrimaryTier == 1 && strcmp(sWeaponName[7], "smg_mp5") == 0 || iPrimaryTier == 2 && (strcmp(sWeaponName[7], "rifle_sg552") == 0 || strcmp(sWeaponName[7], "sniper_scout") == 0 || strcmp(sWeaponName[7], "sniper_awp") == 0)))
+			if (GetWeaponTier(iEntIndex) > 0 && !WeaponHasEnoughAmmo(iEntIndex))
 				continue;
 
-			if (g_iWeapon_AmmoLeft[iEntIndex] <= RoundFloat(g_iWeapon_MaxAmmo[iEntIndex] * 0.2) && strcmp(sWeaponName[7], "grenade_launcher") == 0)
-				continue;
-
-			if ((g_iWeapon_Clip1[iEntIndex] <= 0 || g_iWeapon_Clip1[iEntIndex] <= RoundFloat(L4D2_GetIntWeaponAttribute("weapon_rifle_m60", L4D2IWA_ClipSize) * 0.2)) && strcmp(sWeaponName[7], "rifle_m60") == 0)
-				continue;
-
-			if (iUseCount == 1 && strcmp(sWeaponName[7], "ammo_spawn") != 0)
+			if (iUseCount == 1 && iItemFlags & FLAG_AMMO)
 			{
 				bIsTaken = false;
 				for (int j = 1; j <= MaxClients; j++)
 				{
-					if (j == iClient || !IsClientSurvivor(j) || !IsFakeClient(j) || iEntIndex != g_iSurvivorBot_ScavengeItem[j] || !IsEntityExists(g_iSurvivorBot_ScavengeItem[j]))
+					if (j == iClient || !IsClientSurvivor(j) || !IsFakeClient(j) || iEntIndex != g_iBot_ScavengeItem[j] || !g_iBot_ScavengeItem[j])
 						continue;
 
 					bIsTaken = true;
@@ -3900,7 +4656,7 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 			bInUseRange = (GetVectorDistance(g_fClientEyePos[iClient], fEntityPos, true) <= fPickupRange);
 			if (!bInUseRange)
 			{
-				if (bIsCoop && bInCheckpoint && !LBI_IsPositionInsideCheckpoint(fEntityPos))
+				if (bIsCoop && bInCheckpoint2 && !(bInCheckpoint = LBI_IsPositionInsideCheckpoint(fEntityPos)))
 					continue;
 
 				if (bCheckIsReachable && !LBI_IsReachableEntity(iClient, iEntIndex))
@@ -3908,22 +4664,27 @@ int GetItemFromArrayList(ArrayList hArrayList, int iClient, float fDistance = -1
 
 				if (bCheckIsVisible && fDistance > g_fCvar_ItemScavenge_ApproachRange)
 				{ 
-					iNavArea = L4D_GetNearestNavArea(fEntityPos, _, true, true, false);
+					iNavArea = L4D_GetNearestNavArea(fEntityPos, g_fCvar_ItemScavenge_ApproachVisibleRange, true, false, true);
 					if (iNavArea && !LBI_IsNavAreaPartiallyVisible(iNavArea, g_fClientEyePos[iClient], iClient))
 					{
-						fCheckDist = g_fCvar_ItemScavenge_ApproachRange;
+						fApproachDist = g_fCvar_ItemScavenge_ApproachRange;
 					}
 				}
 			}
 		}
 
 		fCurDist = GetVectorDistance(fClientPos, fEntityPos, true);
-		if (!bInUseRange && fCurDist > (fCheckDist*fCheckDist))continue;
+		if (!g_bTeamHasHumanPlayer)
+			fApproachDist *= g_fCvar_ItemScavenge_NoHumansRangeMultiplier;
 
-		return iEntIndex;
+		if (!bInUseRange && !bInCheckpoint && fCurDist > (fApproachDist*fApproachDist) || fCurDist >= fCheckDist)
+			continue;
+
+		iCloseItem = iEntIndex;
+		fCheckDist = fCurDist;
 	}
 
-	return -1;
+	return iCloseItem;
 }
 
 int GetEntityOwner(int iEntity)
@@ -3934,10 +4695,10 @@ int GetEntityOwner(int iEntity)
 
 	for (int i = 0; i <= 5; i++)
 	{
-		if (GetClientWeaponInventory(iOwner, i) != iEntity)continue;
-		return iOwner;
+		if (GetWeaponInInventory(iOwner, i) == iEntity)
+			return iOwner;
 	}
-	return -1;
+	return 0;
 }
 
 public void OnEntityCreated(int iEntity, const char[] sClassname)
@@ -3946,178 +4707,170 @@ public void OnEntityCreated(int iEntity, const char[] sClassname)
 		return;
 		
 	g_iItem_Used[iEntity] = 0; // Clear used item bitfield
+	g_iWeaponID[iEntity] = 0;
+	g_iMeleeID[iEntity] = -1;
+	g_iItemFlags[iEntity] = 0;
+	
 	CheckEntityForStuff(iEntity, sClassname);
 }
 
 void CheckEntityForStuff(int iEntity, const char[] sClassname)
 {
-	if (g_hWitchList && strcmp(sClassname, "witch") == 0)
+	if (!g_bInitCheckCases)
 	{
-		int iWitchRef;
-		for (int i = 0; i < g_hWitchList.Length; i++)
+		InitCheckCases();
+		//PrintToServer("CheckEntityForStuff: InitCheckCases");
+	}
+
+	static int iCheckCase;
+	if (!g_hCheckCases.GetValue(sClassname, iCheckCase))
+		iCheckCase = 0;
+
+	switch(iCheckCase)
+	{
+		case 1:	//witch
 		{
-			iWitchRef = EntRefToEntIndex(g_hWitchList.Get(i));
-			if (iWitchRef == INVALID_ENT_REFERENCE || !IsEntityExists(iWitchRef))
+			if (g_hWitchList)
 			{
-				g_hWitchList.Erase(i);
-				continue;
+				int iWitchRef;
+				for (int i = 0; i < g_hWitchList.Length; i++)
+				{
+					iWitchRef = EntRefToEntIndex(g_hWitchList.Get(i));
+					if (iWitchRef == INVALID_ENT_REFERENCE || !L4D_IsValidEnt(iWitchRef))
+					{
+						g_hWitchList.Erase(i);
+						continue;
+					}
+
+					if (iWitchRef == iEntity)
+						return;
+				}
+
+				int iIndex = g_hWitchList.Push(EntIndexToEntRef(iEntity));
+				g_hWitchList.Set(iIndex, 0, 1);
+
+				SDKHook(iEntity, SDKHook_OnTakeDamage, OnWitchTakeDamage);
+				return;
 			}
-			if (iWitchRef == iEntity)return;
 		}
 
-		int iIndex = g_hWitchList.Push(EntIndexToEntRef(iEntity));
-		g_hWitchList.Set(iIndex, 0, 1); return;
-	}
+		case 2:	//ammo
+		{
+			PushEntityIntoArray(g_hAmmopileList, iEntity);
+			g_iWeaponID[iEntity] = 54; // L4D2WeaponId_Ammo
+			g_iItemFlags[iEntity] = FLAG_ITEM | FLAG_AMMO;
+			return;
+		}
 
-	if (strcmp(sClassname, "weapon_ammo_spawn") == 0)
-	{
-		PushEntityIntoArrayList(g_hAmmopileList, iEntity);
+		case 3:	//laser sight
+		{
+			PushEntityIntoArray(g_hLaserSightList, iEntity);
+			return;
+		}
+
+		case 4:	//deployed ammo upgrade
+		{
+			PushEntityIntoArray(g_hDeployedAmmoPacks, iEntity);
+			g_iWeaponID[iEntity] = 22; // L4D2WeaponId_AmmoPack, idk if this makes sense actually
+			g_iItemFlags[iEntity] = FLAG_ITEM | FLAG_AMMO | FLAG_UPGRADE;
+			return;
+		}
+	}	
+
+	static char sWeaponName[64];
+	if (!GetWeaponClassname(iEntity, sWeaponName, sizeof(sWeaponName)))
 		return;
-	}
-	if (strcmp(sClassname, "upgrade_laser_sight") == 0)
-	{
-		PushEntityIntoArrayList(g_hLaserSightList, iEntity);
+	
+	static L4D2WeaponId iWeaponID;
+	iWeaponID = L4D2WeaponId_None;	
+	if(!g_hWeaponToIDMap.GetValue(sWeaponName, iWeaponID))
 		return;
-	}
-	if (strcmp(sClassname, "upgrade_ammo_explosive") == 0 || strcmp(sClassname, "upgrade_ammo_incendiary") == 0)
+
+	g_iWeaponID[iEntity] = view_as<int>(iWeaponID);
+	if (iWeaponID == L4D2WeaponId_Melee)
 	{
-		PushEntityIntoArrayList(g_hDeployedAmmoPacks, iEntity);
-		return;
+		if(g_iCvar_Debug & DEBUG_WEP_DATA)
+			PrintToServer("CheckEntityForStuff: %d %s %d %s",iEntity, sClassname, iWeaponID, sWeaponName);
+		if(!g_bInitMeleeIDs) InitMeleeIDs();
+		g_iMeleeID[iEntity] = GetMeleeID(iEntity);
 	}
 	
-	if (strcmp(sClassname, "pipe_bomb_projectile") == 0 || strcmp(sClassname, "vomitjar_projectile") == 0)
+	if (!g_bInitItemFlags)
 	{
-		g_fSurvivorBot_Grenade_NextThrowTime = GetGameTime() + GetRandomFloat(g_fCvar_GrenadeThrow_NextThrowTime1, g_fCvar_GrenadeThrow_NextThrowTime2);
-		return;
-	}
-	if (strcmp(sClassname, "molotov_projectile") == 0)
-	{
-		g_fSurvivorBot_Grenade_NextThrowTime_Molotov = GetGameTime() + GetRandomFloat(g_fCvar_GrenadeThrow_NextThrowTime1, g_fCvar_GrenadeThrow_NextThrowTime2);
-		return;
+		InitItemFlagMap();
+		//PrintToServer("CheckEntityForStuff: InitItemFlagMap");
 	}
 
-	L4D2WeaponId iWeaponID = L4D2_GetWeaponId(iEntity);
-	if (iWeaponID == L4D2WeaponId_None)return;
+	static int iItemFlags;
+	iItemFlags = 0;
+	g_hItemFlagMap.GetValue(sWeaponName, iItemFlags);
+	g_iItemFlags[iEntity] = iItemFlags;
 
-	if (iWeaponID == L4D2WeaponId_Pistol || iWeaponID == L4D2WeaponId_PistolMagnum)
-		PushEntityIntoArrayList(g_hPistolList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Melee || iWeaponID == L4D2WeaponId_Chainsaw)
-		PushEntityIntoArrayList(g_hMeleeList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Smg || iWeaponID == L4D2WeaponId_SmgSilenced || iWeaponID == L4D2WeaponId_SmgMP5)
-		PushEntityIntoArrayList(g_hSMGList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Pumpshotgun || iWeaponID == L4D2WeaponId_ShotgunChrome)
-		PushEntityIntoArrayList(g_hShotgunT1List, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Rifle || iWeaponID == L4D2WeaponId_RifleAK47 || iWeaponID == L4D2WeaponId_RifleDesert || iWeaponID == L4D2WeaponId_RifleSG552)
-		PushEntityIntoArrayList(g_hAssaultRifleList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Autoshotgun || iWeaponID == L4D2WeaponId_ShotgunSpas)
-		PushEntityIntoArrayList(g_hShotgunT2List, iEntity);
-	else if (iWeaponID == L4D2WeaponId_HuntingRifle || iWeaponID == L4D2WeaponId_SniperMilitary || iWeaponID == L4D2WeaponId_SniperScout || iWeaponID == L4D2WeaponId_SniperAWP)
-		PushEntityIntoArrayList(g_hSniperRifleList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_PipeBomb || iWeaponID == L4D2WeaponId_Molotov || iWeaponID == L4D2WeaponId_Vomitjar)
-		PushEntityIntoArrayList(g_hGrenadeList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_RifleM60 || iWeaponID == L4D2WeaponId_GrenadeLauncher)
-		PushEntityIntoArrayList(g_hTier3List, iEntity);
-	else if (iWeaponID == L4D2WeaponId_FragAmmo || iWeaponID == L4D2WeaponId_IncendiaryAmmo)
-		PushEntityIntoArrayList(g_hUpgradePackList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_FirstAidKit)
-		PushEntityIntoArrayList(g_hFirstAidKitList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Defibrillator)
-		PushEntityIntoArrayList(g_hDefibrillatorList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_PainPills)
-		PushEntityIntoArrayList(g_hPainPillsList, iEntity);
-	else if (iWeaponID == L4D2WeaponId_Adrenaline)
-		PushEntityIntoArrayList(g_hAdrenalineList, iEntity);
+	if (iWeaponID > L4D2WeaponId_Machinegun && iWeaponID < L4D2WeaponId_Ammo)
+		return;
+	
+	switch(iWeaponID)
+	{
+		case L4D2WeaponId_None: return;
+		
+		case L4D2WeaponId_Pistol, L4D2WeaponId_PistolMagnum:
+			PushEntityIntoArray(g_hPistolList, iEntity);
+		
+		case L4D2WeaponId_Melee, L4D2WeaponId_Chainsaw:
+			PushEntityIntoArray(g_hMeleeList, iEntity);
+		
+		case L4D2WeaponId_Smg, L4D2WeaponId_SmgSilenced, L4D2WeaponId_SmgMP5:
+			PushEntityIntoArray(g_hSMGList, iEntity);
+		
+		case L4D2WeaponId_Pumpshotgun, L4D2WeaponId_ShotgunChrome:
+			PushEntityIntoArray(g_hShotgunT1List, iEntity);
+		
+		case L4D2WeaponId_Rifle, L4D2WeaponId_RifleAK47, L4D2WeaponId_RifleDesert, L4D2WeaponId_RifleSG552:
+			PushEntityIntoArray(g_hAssaultRifleList, iEntity);
+		
+		case L4D2WeaponId_Autoshotgun, L4D2WeaponId_ShotgunSpas:
+			PushEntityIntoArray(g_hShotgunT2List, iEntity);
+		
+		case L4D2WeaponId_HuntingRifle, L4D2WeaponId_SniperMilitary, L4D2WeaponId_SniperScout, L4D2WeaponId_SniperAWP:
+			PushEntityIntoArray(g_hSniperRifleList, iEntity);
+		
+		case L4D2WeaponId_PipeBomb, L4D2WeaponId_Molotov, L4D2WeaponId_Vomitjar:
+			PushEntityIntoArray(g_hGrenadeList, iEntity);
+		
+		case L4D2WeaponId_RifleM60, L4D2WeaponId_GrenadeLauncher:
+			PushEntityIntoArray(g_hTier3List, iEntity);
+		
+		case L4D2WeaponId_FragAmmo, L4D2WeaponId_IncendiaryAmmo:
+			PushEntityIntoArray(g_hUpgradePackList, iEntity);
+		
+		case L4D2WeaponId_FirstAidKit:
+			PushEntityIntoArray(g_hFirstAidKitList, iEntity);
+		
+		case L4D2WeaponId_Defibrillator:
+			PushEntityIntoArray(g_hDefibrillatorList, iEntity);
+		
+		case L4D2WeaponId_PainPills:
+			PushEntityIntoArray(g_hPainPillsList, iEntity);
+		
+		case L4D2WeaponId_Adrenaline:
+			PushEntityIntoArray(g_hAdrenalineList, iEntity);
+	}
 
 	if (iWeaponID == L4D2WeaponId_Chainsaw)
 	{
 		g_iWeapon_Clip1[iEntity] = g_iCvar_MaxAmmo_Chainsaw;
 		g_iWeapon_MaxAmmo[iEntity] = g_iCvar_MaxAmmo_Chainsaw;
 		g_iWeapon_AmmoLeft[iEntity] = g_iCvar_MaxAmmo_Chainsaw;
+		g_iMeleeID[iEntity] = 16;
+		return;
 	}
-	else if (iWeaponID != L4D2WeaponId_RifleM60 && iWeaponID != L4D2WeaponId_GrenadeLauncher)
+	
+	if (g_iWeaponTier[iWeaponID])
 	{
-		static char sWeaponName[64];
-		if (L4D2_GetWeaponNameByWeaponId(iWeaponID, sWeaponName, sizeof(sWeaponName)) && L4D2_GetIntWeaponAttribute(sWeaponName, L4D2IWA_Tier) != 0)
-		{
-			g_iWeapon_Clip1[iEntity] = L4D2_GetIntWeaponAttribute(sWeaponName, L4D2IWA_ClipSize);
-			g_iWeapon_MaxAmmo[iEntity] = GetWeaponMaxAmmo(iEntity, iWeaponID);
-			g_iWeapon_AmmoLeft[iEntity] = g_iWeapon_MaxAmmo[iEntity];
-		}
+		g_iWeapon_Clip1[iEntity] = L4D2_GetIntWeaponAttribute(sWeaponName, L4D2IWA_ClipSize);
+		g_iWeapon_MaxAmmo[iEntity] = GetWeaponMaxAmmo(iEntity);
+		g_iWeapon_AmmoLeft[iEntity] = g_iWeapon_MaxAmmo[iEntity];
 	}
-
-	//if (IsEntityWeapon(iEntity))
-	//{
-	//	static char sWeaponName[64];
-	//	GetWeaponClassname(iEntity, sWeaponName, sizeof(sWeaponName));
-
-	//	if (strcmp(sWeaponName[7], "pistol") == 0 || strcmp(sWeaponName[14], "magnum") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hPistolList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "melee") == 0 || strcmp(sWeaponName[7], "chainsaw") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hMeleeList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "smg") == 0 || strcmp(sWeaponName[11], "silenced") == 0 || strcmp(sWeaponName[7], "smg_mp5") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hSMGList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "pumpshotgun") == 0 || strcmp(sWeaponName[7], "shotgun_chrome") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hShotgunT1List, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "rifle") == 0 || strcmp(sWeaponName[7], "rifle_ak47") == 0 || strcmp(sWeaponName[7], "rifle_desert") == 0 || strcmp(sWeaponName[7], "rifle_sg552") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hAssaultRifleList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "autoshotgun") == 0 || strcmp(sWeaponName[7], "shotgun_spas") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hShotgunT2List, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "hunting_rifle") == 0 || strcmp(sWeaponName[7], "sniper_military") == 0 || strcmp(sWeaponName[7], "sniper_awp") == 0 || strcmp(sWeaponName[7], "sniper_scout") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hSniperRifleList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "pipe_bomb") == 0 || strcmp(sWeaponName[7], "molotov") == 0 || strcmp(sWeaponName[7], "vomitjar") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hGrenadeList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "rifle_m60") == 0 || strcmp(sWeaponName[15], "launcher") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hTier3List, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[19], "explosive") == 0 || strcmp(sWeaponName[19], "incendiary") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hUpgradePackList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "first_aid_kit") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hFirstAidKitList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "defibrillator") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hDefibrillatorList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "pain_pills") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hPainPillsList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "adrenaline") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hAdrenalineList, iEntity);
-	//	}
-	//	else if (strcmp(sWeaponName[7], "ammo_spawn") == 0)
-	//	{
-	//		PushEntityIntoArrayList(g_hAmmopileList, iEntity);
-	//	}
-
-	//	if ((strcmp(sWeaponName[7], "chainsaw") == 0 || GetWeaponTier(iEntity) > 0) && g_iWeapon_MaxAmmo[iEntity] <= 0)
-	//	{
-	//		g_iWeapon_Clip1[iEntity] = (strcmp(sWeaponName[7], "chainsaw") == 0 ? GetWeaponMaxAmmo(iEntity) : L4D2_GetIntWeaponAttribute(sWeaponName, L4D2IWA_ClipSize));
-	//		g_iWeapon_MaxAmmo[iEntity] = GetWeaponMaxAmmo(iEntity);
-	//		g_iWeapon_AmmoLeft[iEntity] = g_iWeapon_MaxAmmo[iEntity];
-	//	}
-	//}
 }
 
 bool ShouldUseFlowDistance()
@@ -4131,7 +4884,7 @@ bool ShouldUseFlowDistance()
 	return false;
 }
 
-void PushEntityIntoArrayList(ArrayList hArrayList, int iEntity)
+void PushEntityIntoArray(ArrayList hArrayList, int iEntity)
 {
 	if (!hArrayList)return;
 	int iEntRef = EntIndexToEntRef(iEntity);
@@ -4145,34 +4898,38 @@ public void OnEntityDestroyed(int iEntity)
 		return;
 		
 	g_iItem_Used[iEntity] = 0; // Clear used item bitfield
+	g_iWeaponID[iEntity] = 0;
+	g_iMeleeID[iEntity] = -1;
+	g_iItemFlags[iEntity] = 0;
 
-	CheckArrayListForEntityRemoval(g_hMeleeList, iEntity);
-	CheckArrayListForEntityRemoval(g_hPistolList, iEntity);
-	CheckArrayListForEntityRemoval(g_hSMGList, iEntity);
-	CheckArrayListForEntityRemoval(g_hShotgunT1List, iEntity);
-	CheckArrayListForEntityRemoval(g_hShotgunT2List, iEntity);
-	CheckArrayListForEntityRemoval(g_hAssaultRifleList, iEntity);
-	CheckArrayListForEntityRemoval(g_hSniperRifleList, iEntity);
-	CheckArrayListForEntityRemoval(g_hTier3List, iEntity);
-	CheckArrayListForEntityRemoval(g_hFirstAidKitList, iEntity);
-	CheckArrayListForEntityRemoval(g_hDefibrillatorList, iEntity);
-	CheckArrayListForEntityRemoval(g_hPainPillsList, iEntity);
-	CheckArrayListForEntityRemoval(g_hAdrenalineList, iEntity);
-	CheckArrayListForEntityRemoval(g_hGrenadeList, iEntity);
-	CheckArrayListForEntityRemoval(g_hUpgradePackList, iEntity);
+	ValidateEntityRemovalInArray(g_hMeleeList, iEntity);
+	ValidateEntityRemovalInArray(g_hPistolList, iEntity);
+	ValidateEntityRemovalInArray(g_hSMGList, iEntity);
+	ValidateEntityRemovalInArray(g_hShotgunT1List, iEntity);
+	ValidateEntityRemovalInArray(g_hShotgunT2List, iEntity);
+	ValidateEntityRemovalInArray(g_hAssaultRifleList, iEntity);
+	ValidateEntityRemovalInArray(g_hSniperRifleList, iEntity);
+	ValidateEntityRemovalInArray(g_hTier3List, iEntity);
+	ValidateEntityRemovalInArray(g_hFirstAidKitList, iEntity);
+	ValidateEntityRemovalInArray(g_hDefibrillatorList, iEntity);
+	ValidateEntityRemovalInArray(g_hPainPillsList, iEntity);
+	ValidateEntityRemovalInArray(g_hAdrenalineList, iEntity);
+	ValidateEntityRemovalInArray(g_hGrenadeList, iEntity);
+	ValidateEntityRemovalInArray(g_hUpgradePackList, iEntity);
 
-	CheckArrayListForEntityRemoval(g_hAmmopileList, iEntity);
-	CheckArrayListForEntityRemoval(g_hLaserSightList, iEntity);
-	CheckArrayListForEntityRemoval(g_hDeployedAmmoPacks, iEntity);
+	ValidateEntityRemovalInArray(g_hAmmopileList, iEntity);
+	ValidateEntityRemovalInArray(g_hLaserSightList, iEntity);
+	ValidateEntityRemovalInArray(g_hDeployedAmmoPacks, iEntity);
+	ValidateEntityRemovalInArray(g_hForbiddenItemList, iEntity);
 
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		g_iSurvivorBot_VisionMemory_State[i][iEntity] = g_iSurvivorBot_VisionMemory_State_FOV[i][iEntity] = 0;
-		g_fSurvivorBot_VisionMemory_Time[i][iEntity] = g_fSurvivorBot_VisionMemory_Time_FOV[i][iEntity] = GetGameTime();
+		g_iBot_VisionMemory_State[i][iEntity] = g_iBot_VisionMemory_State_FOV[i][iEntity] = 0;
+		g_fBot_VisionMemory_Time[i][iEntity] = g_fBot_VisionMemory_Time_FOV[i][iEntity] = GetGameTime();
 	}
 }
 
-void CheckArrayListForEntityRemoval(ArrayList hArrayList, int iEntity)
+void ValidateEntityRemovalInArray(ArrayList hArrayList, int iEntity)
 {
 	if (!hArrayList)return;
 	int iArrayEnt = hArrayList.FindValue(EntIndexToEntRef(iEntity));
@@ -4182,18 +4939,67 @@ void CheckArrayListForEntityRemoval(ArrayList hArrayList, int iEntity)
 public void OnMapStart()
 {
 	g_bMapStarted = true;
+	g_bHasLeft4Bots = true;
+
 	GetCurrentMap(g_sCurrentMapName, sizeof(g_sCurrentMapName));
 	for (int i = 1; i <= MaxClients; i++)g_fClient_ThinkFunctionDelay[i] = GetGameTime() + (g_bLateLoad ? 1.0 : 10.0);
 	CreateEntityArrayLists();
+	
+	InitMeleeIDs();
 
-	int iEntity = INVALID_ENT_REFERENCE;
 	static char sEntClassname[64];
-	while ((iEntity = FindEntityByClassname(iEntity, "*")) != INVALID_ENT_REFERENCE)
+	for (int i = 0; i < MAXENTITIES; i++)
 	{
-		if (!IsEntityExists(iEntity))continue;
-		GetEntityClassname(iEntity, sEntClassname, sizeof(sEntClassname));
-		CheckEntityForStuff(iEntity, sEntClassname);
+		g_iItem_Used[i] = 0;
+		g_iWeaponID[i] = 0;
+		g_iMeleeID[i] = -1;
+		g_iItemFlags[i] = 0;
+		if (!L4D_IsValidEnt(i))continue;
+		GetEntityClassname(i, sEntClassname, sizeof(sEntClassname));
+		CheckEntityForStuff(i, sEntClassname);
 	}
+}
+
+void CheckWeaponsLater()
+{
+	static int iEntIndex;
+	static char sEntClassname[64];
+	
+	int count = 0;
+	int i = 0;
+	while (i < g_hWeaponsToCheckLater.Length)
+	{
+		iEntIndex = EntRefToEntIndex(g_hWeaponsToCheckLater.Get(i));
+		if (iEntIndex != INVALID_ENT_REFERENCE && L4D_IsValidEnt(iEntIndex))
+		{
+			GetEntityClassname(iEntIndex, sEntClassname, sizeof(sEntClassname));
+			CheckEntityForStuff(iEntIndex, sEntClassname);
+			if (g_iWeaponID[iEntIndex] != 0)
+			{
+				g_hWeaponsToCheckLater.Erase(i);
+				count++;
+			}
+			else
+			{
+				PrintToServer("CheckWeaponsLater: %d %s WeaponID %d MeleeID %d, stopping and checking again soon\nprocessed %d items",
+					iEntIndex, sEntClassname, g_iWeaponID[iEntIndex], g_iMeleeID[iEntIndex], count);
+				return;
+			}
+		}
+		else
+		{
+			g_hWeaponsToCheckLater.Erase(i);
+			count++;
+		}
+	}
+	g_hCheckWeaponTimer = INVALID_HANDLE;
+	PrintToServer("CheckWeaponsLater: list cleared, processed %d items", count);
+}
+
+public Action CheckWeaponsEvenLater(Handle timer)
+{
+	CheckWeaponsLater();
+	return Plugin_Handled;
 }
 
 public void OnMapEnd()
@@ -4201,6 +5007,11 @@ public void OnMapEnd()
 	g_bMapStarted = false;
 	g_sCurrentMapName[0] = 0;
 	ClearEntityArrayLists();
+	ClearHashMaps();
+	
+	g_bInitMeleePrefs = false;
+	g_hClearBadPathTimer = INVALID_HANDLE;
+	g_hCheckWeaponTimer = INVALID_HANDLE;
 }
 
 void CreateEntityArrayLists()
@@ -4222,7 +5033,10 @@ void CreateEntityArrayLists()
 	g_hAdrenalineList 		= new ArrayList();
 	g_hGrenadeList 			= new ArrayList();
 	g_hDeployedAmmoPacks 	= new ArrayList();
+	g_hForbiddenItemList 	= new ArrayList(2);
 	g_hWitchList 			= new ArrayList(2);
+	g_hBadPathEntities 		= new ArrayList();
+	g_hWeaponsToCheckLater 	= new ArrayList();
 }
 
 void ClearEntityArrayLists()
@@ -4244,7 +5058,316 @@ void ClearEntityArrayLists()
 	g_hAdrenalineList.Clear();
 	g_hGrenadeList.Clear();
 	g_hDeployedAmmoPacks.Clear();
+	g_hForbiddenItemList.Clear();
 	g_hWitchList.Clear();
+	g_hBadPathEntities.Clear();
+	g_hWeaponsToCheckLater.Clear();
+}
+
+void ClearHashMaps()
+{
+	if(g_hMeleeIDs != INVALID_HANDLE)
+		g_hMeleeIDs.Clear();
+	if(g_hCheckCases != INVALID_HANDLE)
+		g_hCheckCases.Clear();
+	if(g_hItemFlagMap != INVALID_HANDLE)
+		g_hItemFlagMap.Clear();
+	if(g_hWeaponMap != INVALID_HANDLE)
+		g_hWeaponMap.Clear();
+	
+	g_bInitMeleeIDs = false;
+	g_bInitCheckCases = false;
+	g_bInitMaxAmmo = false;
+	g_bInitItemFlags = false;
+	g_bInitWeaponMap = false;
+}
+
+void InitItemFlagMap()
+{
+	g_hItemFlagMap = CreateTrie();
+	g_hItemFlagMap.SetValue("weapon_melee"			, FLAG_WEAPON | FLAG_MELEE );
+	g_hItemFlagMap.SetValue("weapon_chainsaw"		, FLAG_WEAPON | FLAG_MELEE | FLAG_CHAINSAW);
+	g_hItemFlagMap.SetValue("weapon_pistol"			, FLAG_WEAPON | FLAG_PISTOL );
+	g_hItemFlagMap.SetValue("weapon_pistol_magnum"	, FLAG_WEAPON | FLAG_PISTOL_EXTRA );
+	g_hItemFlagMap.SetValue("weapon_smg"			, FLAG_WEAPON | FLAG_SMG | FLAG_TIER1 );
+	g_hItemFlagMap.SetValue("weapon_smg_silenced"	, FLAG_WEAPON | FLAG_SMG | FLAG_TIER1 );
+	g_hItemFlagMap.SetValue("weapon_smg_mp5"		, FLAG_WEAPON | FLAG_SMG | FLAG_TIER1 | FLAG_CSS );
+	g_hItemFlagMap.SetValue("weapon_pumpshotgun"	, FLAG_WEAPON | FLAG_SHOTGUN | FLAG_TIER1 );
+	g_hItemFlagMap.SetValue("weapon_shotgun_chrome"	, FLAG_WEAPON | FLAG_SHOTGUN | FLAG_TIER1 );
+	g_hItemFlagMap.SetValue("weapon_autoshotgun"	, FLAG_WEAPON | FLAG_SHOTGUN | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_shotgun_spas"	, FLAG_WEAPON | FLAG_SHOTGUN | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_rifle"			, FLAG_WEAPON | FLAG_ASSAULT | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_rifle_ak47"		, FLAG_WEAPON | FLAG_ASSAULT | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_rifle_desert"	, FLAG_WEAPON | FLAG_ASSAULT | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_rifle_sg552"	, FLAG_WEAPON | FLAG_ASSAULT | FLAG_TIER2 | FLAG_CSS );
+	g_hItemFlagMap.SetValue("weapon_hunting_rifle"	, FLAG_WEAPON | FLAG_SNIPER | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_sniper_military", FLAG_WEAPON | FLAG_SNIPER | FLAG_TIER2 );
+	g_hItemFlagMap.SetValue("weapon_sniper_scout"	, FLAG_WEAPON | FLAG_SNIPER | FLAG_TIER2 | FLAG_CSS );
+	g_hItemFlagMap.SetValue("weapon_sniper_awp"		, FLAG_WEAPON | FLAG_SNIPER | FLAG_TIER2 | FLAG_CSS );
+	g_hItemFlagMap.SetValue("weapon_first_aid_kit"	, FLAG_ITEM | FLAG_HEAL | FLAG_MEDKIT);
+	g_hItemFlagMap.SetValue("weapon_defibrillator"	, FLAG_ITEM | FLAG_HEAL | FLAG_DEFIB);
+	g_hItemFlagMap.SetValue("weapon_pain_pills"		, FLAG_ITEM | FLAG_HEAL );
+	g_hItemFlagMap.SetValue("weapon_adrenaline"		, FLAG_ITEM | FLAG_HEAL );
+	g_hItemFlagMap.SetValue("weapon_molotov"		, FLAG_WEAPON | FLAG_GREN );
+	g_hItemFlagMap.SetValue("weapon_pipe_bomb"		, FLAG_WEAPON | FLAG_GREN );
+	g_hItemFlagMap.SetValue("weapon_vomitjar"		, FLAG_WEAPON | FLAG_GREN );
+	g_hItemFlagMap.SetValue("weapon_gascan"			, FLAG_ITEM | FLAG_CARRY );
+	g_hItemFlagMap.SetValue("weapon_propanetank"	, FLAG_ITEM | FLAG_CARRY );
+	g_hItemFlagMap.SetValue("weapon_oxygentank"		, FLAG_ITEM | FLAG_CARRY );
+	g_hItemFlagMap.SetValue("weapon_gnome"			, FLAG_ITEM | FLAG_CARRY );
+	g_hItemFlagMap.SetValue("weapon_cola_bottles"	, FLAG_ITEM | FLAG_CARRY );
+	g_hItemFlagMap.SetValue("weapon_fireworkcrate"	, FLAG_ITEM | FLAG_CARRY );
+	g_hItemFlagMap.SetValue("weapon_grenade_launcher", FLAG_WEAPON | FLAG_GL | FLAG_TIER3 );
+	g_hItemFlagMap.SetValue("weapon_rifle_m60"		, FLAG_WEAPON | FLAG_M60 | FLAG_TIER3 );
+	g_hItemFlagMap.SetValue("weapon_upgradepack_incendiary"	, FLAG_ITEM | FLAG_UPGRADE );
+	g_hItemFlagMap.SetValue("weapon_upgradepack_explosive"	, FLAG_ITEM | FLAG_UPGRADE );
+	g_hItemFlagMap.SetValue("weapon_ammo"			, FLAG_ITEM | FLAG_AMMO );
+	g_hItemFlagMap.SetValue("weapon_ammo_pack"		, FLAG_ITEM | FLAG_AMMO | FLAG_UPGRADE );
+	g_hItemFlagMap.SetValue("upgrade_item"			, FLAG_ITEM | FLAG_UPGRADE );
+	g_bInitItemFlags = true;
+}
+
+void InitMeleeIDs()
+{
+	g_hMeleeIDs = CreateTrie();
+	int iTable = FindStringTable("meleeweapons");
+	
+	if( iTable == INVALID_STRING_TABLE ) // Default to known IDs
+	{
+		PrintToServer("InitMeleeIDs: no meleeweapons table!!!");
+		g_hMeleeIDs.SetValue("fireaxe",				0);
+		g_hMeleeIDs.SetValue("frying_pan",			1);
+		g_hMeleeIDs.SetValue("machete",				2);
+		g_hMeleeIDs.SetValue("baseball_bat",		3);
+		g_hMeleeIDs.SetValue("crowbar",				4);
+		g_hMeleeIDs.SetValue("cricket_bat",			5);
+		g_hMeleeIDs.SetValue("tonfa",				6);
+		g_hMeleeIDs.SetValue("katana",				7);
+		g_hMeleeIDs.SetValue("electric_guitar",		8);
+		g_hMeleeIDs.SetValue("knife",				9);
+		g_hMeleeIDs.SetValue("golfclub",			10);
+		g_hMeleeIDs.SetValue("pitchfork",			11);
+		g_hMeleeIDs.SetValue("shovel",				12);
+	} else {
+		// Get actual IDs
+		int iNum = GetStringTableNumStrings(iTable);
+		char sName[PLATFORM_MAX_PATH];
+
+		for( int i = 0; i < iNum; i++ )
+		{
+			ReadStringTable(iTable, i, sName, sizeof(sName));
+			//PrintToServer("InitMeleeIDs: %s id %d", sName, i);
+			g_hMeleeIDs.SetValue(sName, i);
+		}
+	}
+	g_hMeleeIDs.SetValue("chainsaw", 16);
+	
+	g_bInitMeleeIDs = true;
+}
+
+void InitMeleePrefs()
+{
+	static char szOutputBuffer[32];
+	static int iMeleeID, iValue;
+	
+	for (int i = 0; i < 16; i++)
+		g_iMeleePreference[i] = -1;
+	
+	Handle hKeys = CreateTrieSnapshot(g_hMeleePref);
+	int size = GetTrieSize(g_hMeleePref);
+	//PrintToServer("InitMeleePrefs: g_hMeleePref size %d", size);
+	for (int i = 0; i < size; i++)
+	{
+		GetTrieSnapshotKey(hKeys, i, szOutputBuffer, sizeof(szOutputBuffer));
+		if (g_hMeleeIDs.GetValue(szOutputBuffer, iMeleeID))
+		{
+			g_hMeleePref.GetValue(szOutputBuffer, iValue);
+			//PrintToServer("%d %s %d", iMeleeID, szOutputBuffer, iValue);
+			g_iMeleePreference[iMeleeID] = iValue;
+		}
+	}
+	delete hKeys;
+	g_bInitMeleePrefs = true;
+}
+
+void InitCheckCases()
+{
+	g_hCheckCases = CreateTrie();
+	g_hCheckCases.SetValue("witch", 1 );
+	g_hCheckCases.SetValue("weapon_ammo_spawn", 2 );
+	g_hCheckCases.SetValue("upgrade_laser_sight", 3 );
+	g_hCheckCases.SetValue("upgrade_ammo_explosive", 4 );
+	g_hCheckCases.SetValue("upgrade_ammo_incendiary", 4 );
+	g_bInitCheckCases = true;
+}
+
+void InitMaxAmmo()
+{
+	int iMaxAmmo, iAmmoOverride[56];
+	char sArgs[16][8], szOutputBuffer[2][4];
+	L4D2WeaponId iWeaponID;
+	
+	if ( strlen(g_sCvar_Ammo_Type_Override) && ExplodeString(g_sCvar_Ammo_Type_Override, " ", sArgs, sizeof(sArgs), sizeof(sArgs[]), true) )
+	{
+		for (int i = 0; i < sizeof(sArgs); i++)
+		{
+			if (ExplodeString(sArgs[i], ":", szOutputBuffer, sizeof(szOutputBuffer), sizeof(szOutputBuffer[]), true) == 2)
+				iAmmoOverride[StringToInt(szOutputBuffer[0])] = StringToInt(szOutputBuffer[1]);
+		}
+	}
+	
+	for (int i = 0; i < 56; i++) // L4D2WeaponId_MAX is 56
+	{
+		iWeaponID = view_as<L4D2WeaponId>(i);
+		iMaxAmmo = -1;
+		if (iAmmoOverride[i])
+		{
+			g_iMaxAmmo[i] = iAmmoOverride[i];
+			//if (g_bCvar_Debug)
+			//	PrintToServer("InitMaxAmmo: %s max ammo %d (override)", IBWeaponName[i], g_iMaxAmmo[i]);
+			continue;
+		}
+		switch(iWeaponID)
+		{
+			case L4D2WeaponId_Pistol, L4D2WeaponId_PistolMagnum:
+				iMaxAmmo = g_iCvar_MaxAmmo_Pistol;
+			case L4D2WeaponId_Smg, L4D2WeaponId_SmgSilenced, L4D2WeaponId_SmgMP5:
+				iMaxAmmo = g_iCvar_MaxAmmo_SMG;
+			case L4D2WeaponId_Pumpshotgun, L4D2WeaponId_ShotgunChrome:
+				iMaxAmmo = g_iCvar_MaxAmmo_Shotgun;
+			case L4D2WeaponId_Autoshotgun, L4D2WeaponId_ShotgunSpas:
+				iMaxAmmo = g_iCvar_MaxAmmo_AutoShotgun;
+			case L4D2WeaponId_Rifle, L4D2WeaponId_RifleAK47, L4D2WeaponId_RifleDesert, L4D2WeaponId_RifleSG552:
+				iMaxAmmo = g_iCvar_MaxAmmo_AssaultRifle;
+			case L4D2WeaponId_HuntingRifle:
+				iMaxAmmo = g_iCvar_MaxAmmo_HuntRifle;
+			case L4D2WeaponId_SniperMilitary, L4D2WeaponId_SniperScout, L4D2WeaponId_SniperAWP:
+				iMaxAmmo = g_iCvar_MaxAmmo_SniperRifle;
+			case L4D2WeaponId_GrenadeLauncher:
+				iMaxAmmo = g_iCvar_MaxAmmo_GrenLauncher;
+			case L4D2WeaponId_RifleM60:
+				iMaxAmmo = g_iCvar_MaxAmmo_M60;
+			case L4D2WeaponId_FirstAidKit:
+				iMaxAmmo = g_iCvar_MaxAmmo_Medkit;
+			case L4D2WeaponId_Adrenaline:
+				iMaxAmmo = g_iCvar_MaxAmmo_Adrenaline;
+			case L4D2WeaponId_PainPills:
+				iMaxAmmo = g_iCvar_MaxAmmo_PainPills;
+			case L4D2WeaponId_FragAmmo, L4D2WeaponId_IncendiaryAmmo:
+				iMaxAmmo = g_iCvar_MaxAmmo_AmmoPack;
+			case L4D2WeaponId_Chainsaw:
+				iMaxAmmo = g_iCvar_MaxAmmo_Chainsaw;
+			case L4D2WeaponId_PipeBomb:
+				iMaxAmmo = g_iCvar_MaxAmmo_PipeBomb;
+			case L4D2WeaponId_Molotov:
+				iMaxAmmo = g_iCvar_MaxAmmo_Molotov;
+			case L4D2WeaponId_Vomitjar:
+				iMaxAmmo = g_iCvar_MaxAmmo_VomitJar;
+		}
+		g_iMaxAmmo[i] = iMaxAmmo;
+		//if (g_bCvar_Debug && iMaxAmmo > -1)
+		//	PrintToServer("InitMaxAmmo: %s max ammo %d", IBWeaponName[i], g_iMaxAmmo[i]);
+	}
+	
+	for (int i = 0; i > MAXENTITIES; i++)
+	{
+		g_iWeapon_MaxAmmo[i] = g_iMaxAmmo[g_iWeaponID[i]];
+	}
+	g_bInitMaxAmmo = true;
+}
+
+void InitWeaponAndTierMap()
+{
+	//g_iWeaponTier[L4D2WeaponId_None] = -1;
+	//g_iWeaponTier[L4D2WeaponId_Pistol] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Smg] = 1;
+	//g_iWeaponTier[L4D2WeaponId_Pumpshotgun] = 1;
+	//g_iWeaponTier[L4D2WeaponId_Autoshotgun] = 2;
+	//g_iWeaponTier[L4D2WeaponId_Rifle] = 2;
+	//g_iWeaponTier[L4D2WeaponId_HuntingRifle] = 2;
+	//g_iWeaponTier[L4D2WeaponId_SmgSilenced] = 1;
+	//g_iWeaponTier[L4D2WeaponId_ShotgunChrome] = 1;
+	//g_iWeaponTier[L4D2WeaponId_RifleDesert] = 2;
+	//g_iWeaponTier[L4D2WeaponId_SniperMilitary] = 2;
+	//g_iWeaponTier[L4D2WeaponId_ShotgunSpas] = 2;
+	//g_iWeaponTier[L4D2WeaponId_FirstAidKit] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Molotov] = 0;
+	//g_iWeaponTier[L4D2WeaponId_PipeBomb] = 0;
+	//g_iWeaponTier[L4D2WeaponId_PainPills] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Gascan] = 0;
+	//g_iWeaponTier[L4D2WeaponId_PropaneTank] = 0;
+	//g_iWeaponTier[L4D2WeaponId_OxygenTank] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Melee] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Chainsaw] = 0;
+	g_iWeaponTier[L4D2WeaponId_GrenadeLauncher] = 3;
+	g_iWeaponTier[L4D2WeaponId_AmmoPack] = -1;
+	//g_iWeaponTier[L4D2WeaponId_Adrenaline] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Defibrillator] = 0;
+	//g_iWeaponTier[L4D2WeaponId_Vomitjar] = 0;
+	//g_iWeaponTier[L4D2WeaponId_RifleAK47] = 0;
+	//g_iWeaponTier[L4D2WeaponId_GnomeChompski] = 0;
+	//g_iWeaponTier[L4D2WeaponId_ColaBottles] = 0;
+	//g_iWeaponTier[L4D2WeaponId_FireworksBox] = 0;
+	//g_iWeaponTier[L4D2WeaponId_IncendiaryAmmo] = 0;
+	//g_iWeaponTier[L4D2WeaponId_FragAmmo] = 0;
+	//g_iWeaponTier[L4D2WeaponId_PistolMagnum] = 0;
+	//g_iWeaponTier[L4D2WeaponId_SmgMP5] = 1;
+	//g_iWeaponTier[L4D2WeaponId_RifleSG552] = 2;
+	//g_iWeaponTier[L4D2WeaponId_SniperAWP] = 2;
+	//g_iWeaponTier[L4D2WeaponId_SniperScout] = 2;
+	g_iWeaponTier[L4D2WeaponId_RifleM60] = 3;
+	g_iWeaponTier[L4D2WeaponId_Machinegun] = -1;
+	g_iWeaponTier[L4D2WeaponId_FatalVomit] = -1;
+	g_iWeaponTier[L4D2WeaponId_ExplodingSplat] = -1;
+	g_iWeaponTier[L4D2WeaponId_LungePounce] = -1;
+	g_iWeaponTier[L4D2WeaponId_Lounge] = -1;
+	g_iWeaponTier[L4D2WeaponId_FullPull] = -1;
+	g_iWeaponTier[L4D2WeaponId_Choke] = -1;
+	g_iWeaponTier[L4D2WeaponId_ThrowingRock] = -1;
+	g_iWeaponTier[L4D2WeaponId_TurboPhysics] = -1;
+	g_iWeaponTier[L4D2WeaponId_Ammo] = -1;
+	g_iWeaponTier[L4D2WeaponId_UpgradeItem] = -1;
+	
+	g_bIsSemiAuto[L4D2WeaponId_Pistol] = true;
+	g_bIsSemiAuto[L4D2WeaponId_PistolMagnum] = true;
+	g_bIsSemiAuto[L4D2WeaponId_Pumpshotgun] = true;
+	g_bIsSemiAuto[L4D2WeaponId_ShotgunChrome] = true;
+	g_bIsSemiAuto[L4D2WeaponId_Autoshotgun] = true;
+	g_bIsSemiAuto[L4D2WeaponId_ShotgunSpas] = true;
+	g_bIsSemiAuto[L4D2WeaponId_HuntingRifle] = true;
+	g_bIsSemiAuto[L4D2WeaponId_SniperMilitary] = true;
+	g_bIsSemiAuto[L4D2WeaponId_SniperScout] = true;
+	g_bIsSemiAuto[L4D2WeaponId_SniperAWP] = true;
+	g_bIsSemiAuto[L4D2WeaponId_GrenadeLauncher] = true;
+	g_bIsSemiAuto[L4D2WeaponId_PainPills] = true;
+	g_bIsSemiAuto[L4D2WeaponId_Adrenaline] = true;
+	g_bIsSemiAuto[L4D2WeaponId_PipeBomb] = true;
+	g_bIsSemiAuto[L4D2WeaponId_Molotov] = true;
+	g_bIsSemiAuto[L4D2WeaponId_Vomitjar] = true;
+	
+	g_hWeaponMap = CreateTrie();
+	
+	for (int i = 0; i < 56; i++) // L4D2WeaponId_MAX is 56
+		g_hWeaponMap.SetValue(IBWeaponName[i], true);
+	
+	if (L4D_HasMapStarted())
+		UpdateWeaponTiers();
+	else
+		RequestFrame(UpdateWeaponTiers);
+	
+	g_bInitWeaponMap = true;
+}
+
+void UpdateWeaponTiers()
+{
+	for (int i = 0; i < 38; i++) // 37 L4D2WeaponId_RifleM60
+	{
+		if(g_iWeaponTier[i] != 3 && g_iWeaponTier[i] != -1)
+		{
+			g_iWeaponTier[i] = L4D2_GetIntWeaponAttribute(IBWeaponName[i], L4D2IWA_Tier);
+			//PrintToServer("UpdateWeaponTiers: %d %s %d, mapstart %b", i, IBWeaponName[i], g_iWeaponTier[i], L4D_HasMapStarted());
+		}
+	}
 }
 
 void GetEntityModelname(int iEntity, char[] sModelName, int iMaxLength)
@@ -4287,256 +5410,171 @@ int GetEntityMaxHealth(int iEntity)
 
 float GetWeaponCycleTime(int iWeapon)
 {
-	static char sWeaponName[64]; GetWeaponClassname(iWeapon, sWeaponName, sizeof(sWeaponName));
+	static char sWeaponName[64];
+	GetWeaponClassname(iWeapon, sWeaponName, sizeof(sWeaponName));
 	if (!L4D2_IsValidWeapon(sWeaponName))return -1.0;
 	return L4D2_GetFloatWeaponAttribute(sWeaponName, L4D2FWA_CycleTime);
 }
 
-int GetWeaponMaxAmmo(int iWeapon, L4D2WeaponId iWeaponID = L4D2WeaponId_None)
+//Get max ammo for entity depending on weapon ID
+//
+//When this is called, we assume that weapon id is known, and available in g_iWeaponID
+//
+//Instead of figuring out weapon name or ammo type from prop data, we use "lookup table", that's initiated once per round at worst
+//
+int GetWeaponMaxAmmo(int iWeapon)
 {
-	int iAmmoType = GetWeaponAmmoType(iWeapon);
-	if (iAmmoType != -1)
+	if (!g_bInitMaxAmmo)
 	{
-		switch(iAmmoType)
-		{
-			case 1, 2: 	return g_iCvar_MaxAmmo_Pistol;
-			case 3: 	return g_iCvar_MaxAmmo_AssaultRifle;
-			case 5: 	return g_iCvar_MaxAmmo_SMG;
-			case 6: 	return (g_iCvar_MaxAmmo_M60 > 0 ? g_iCvar_MaxAmmo_M60 : L4D2_GetIntWeaponAttribute("weapon_rifle_m60", L4D2IWA_ClipSize));
-			case 7: 	return g_iCvar_MaxAmmo_Shotgun;
-			case 8: 	return g_iCvar_MaxAmmo_AutoShotgun;
-			case 9: 	return g_iCvar_MaxAmmo_HuntRifle;
-			case 10: 	return g_iCvar_MaxAmmo_SniperRifle;
-			case 12: 	return g_iCvar_MaxAmmo_PipeBomb;
-			case 13: 	return g_iCvar_MaxAmmo_Molotov;
-			case 14: 	return g_iCvar_MaxAmmo_VomitJar;
-			case 15: 	return g_iCvar_MaxAmmo_PainPills;
-			case 16: 	
-			{
-				if (iWeaponID == L4D2WeaponId_None)iWeaponID = L4D2_GetWeaponId(iWeapon);
-				return ((iWeaponID == L4D2WeaponId_FragAmmo || iWeaponID == L4D2WeaponId_IncendiaryAmmo) ? g_iCvar_MaxAmmo_AmmoPack : g_iCvar_MaxAmmo_Medkit);
-			}
-			case 17: 	return g_iCvar_MaxAmmo_GrenLauncher;
-			case 18: 	return g_iCvar_MaxAmmo_Adrenaline;
-			case 19: 	return g_iCvar_MaxAmmo_Chainsaw;
-			default:	return -1;
-		}
+		InitMaxAmmo();
+		PrintToServer("GetWeaponMaxAmmo: InitMaxAmmo");
 	}
-
-	if (iWeaponID == L4D2WeaponId_None)
-		iWeaponID = L4D2_GetWeaponId(iWeapon);
-
-	if (iWeaponID == L4D2WeaponId_Pistol || iWeaponID == L4D2WeaponId_PistolMagnum)
-		return g_iCvar_MaxAmmo_SMG;
-	else if (iWeaponID == L4D2WeaponId_Smg || iWeaponID == L4D2WeaponId_SmgSilenced || iWeaponID == L4D2WeaponId_SmgMP5)
-		return g_iCvar_MaxAmmo_SMG;
-	else if (iWeaponID == L4D2WeaponId_Pumpshotgun || iWeaponID == L4D2WeaponId_ShotgunChrome)
-		return g_iCvar_MaxAmmo_Shotgun;
-	else if (iWeaponID == L4D2WeaponId_Autoshotgun || iWeaponID == L4D2WeaponId_ShotgunSpas)
-		return g_iCvar_MaxAmmo_AutoShotgun;
-	else if (iWeaponID == L4D2WeaponId_Rifle || iWeaponID == L4D2WeaponId_RifleAK47 || iWeaponID == L4D2WeaponId_RifleDesert || iWeaponID == L4D2WeaponId_RifleSG552)
-		return g_iCvar_MaxAmmo_AssaultRifle;
-	else if (iWeaponID == L4D2WeaponId_HuntingRifle)
-		return g_iCvar_MaxAmmo_HuntRifle;
-	else if (iWeaponID == L4D2WeaponId_SniperMilitary || iWeaponID == L4D2WeaponId_SniperScout || iWeaponID == L4D2WeaponId_SniperAWP)
-		return g_iCvar_MaxAmmo_SniperRifle;
-	else if (iWeaponID == L4D2WeaponId_GrenadeLauncher)
-		return g_iCvar_MaxAmmo_GrenLauncher;
-	else if (iWeaponID == L4D2WeaponId_RifleM60)
-		return g_iCvar_MaxAmmo_M60;
-	else if (iWeaponID == L4D2WeaponId_FirstAidKit)
-		return g_iCvar_MaxAmmo_Medkit;
-	else if (iWeaponID == L4D2WeaponId_Adrenaline)
-		return g_iCvar_MaxAmmo_Adrenaline;
-	else if (iWeaponID == L4D2WeaponId_PainPills)
-		return g_iCvar_MaxAmmo_PainPills;
-	else if (iWeaponID == L4D2WeaponId_FragAmmo || iWeaponID == L4D2WeaponId_IncendiaryAmmo)
-		return g_iCvar_MaxAmmo_AmmoPack;
-	else if (iWeaponID == L4D2WeaponId_Chainsaw)
-		return g_iCvar_MaxAmmo_Chainsaw;
-	else if (iWeaponID == L4D2WeaponId_PipeBomb)
-		return g_iCvar_MaxAmmo_PipeBomb;
-	else if (iWeaponID == L4D2WeaponId_Molotov)
-		return g_iCvar_MaxAmmo_Molotov;
-	else if (iWeaponID == L4D2WeaponId_Vomitjar)
-		return g_iCvar_MaxAmmo_VomitJar;
-
-	return -1;
+	
+	return g_iMaxAmmo[g_iWeaponID[iWeapon]];
 }
 
 int GetWeaponTier(int iWeapon)
 {
-	if (!IsEntityWeapon(iWeapon))return -1;
-	
-	char sWeaponName[64]; GetWeaponClassname(iWeapon, sWeaponName, sizeof(sWeaponName));
-	if (!L4D2_IsValidWeapon(sWeaponName))return -1;
-	
-	int iTier = L4D2_GetIntWeaponAttribute(sWeaponName, L4D2IWA_Tier);
-	return ((strcmp(sWeaponName[7], "rifle_m60") == 0 || strcmp(sWeaponName[15], "launcher") == 0) && iTier == 0 ? 3 : iTier);
+	return g_iWeaponTier[g_iWeaponID[iWeapon]];
 }
-
-/*
-static const char g_sCarriableProps[][] = 
-{
-	"gnome",
-	"gascan",
-	"propanetank",
-	"oxygentank",
-	"fireworkcrate",
-	"cola_bottles"
-};
-*/
 
 bool IsSurvivorCarryingProp(int iClient)
 {
 	return (IsWeaponSlotActive(iClient, 5));
-
-	/*
-	char sCurWeaponClass[64]; 
-	GetClientWeapon(iClient, sCurWeaponClass, sizeof(sCurWeaponClass));
-	for (int i = 0; i < sizeof(g_sCarriableProps); i++)
-	{
-		if (strcmp(sCurWeaponClass[7], g_sCarriableProps[i]) == 0)
-		{
-			return true;
-		}
-	}
-	return false;
-	*/
 }
 
-bool GetWeaponClassname(int iWeapon, char[] sBuffer, int iMaxLength)
+//	Get weapon classname from entity ID
+//	Return 0 if weapon is not recognized
+//	1 if it's weapon proper
+//	-1 if the entity is not exactly a weapon (may be weapon_spawn)
+int GetWeaponClassname(int iWeapon, char[] szOutputBuffer, int iMaxLength)
 {
-	L4D2WeaponId iWeaponID = L4D2_GetWeaponId(iWeapon);
-	if (iWeaponID != L4D2WeaponId_None)
-	{
-		L4D2_GetWeaponNameByWeaponId(iWeaponID, sBuffer, iMaxLength);
-		if (strcmp(sBuffer, "weapon_ammo") == 0)strcopy(sBuffer, iMaxLength, "weapon_ammo_spawn");
-		return true;
-	}
-
-	char sWeaponModel[PLATFORM_MAX_PATH];
-	GetEntityModelname(iWeapon, sWeaponModel, sizeof(sWeaponModel));
-
-	// SIDEARMS
-	if (strcmp(sWeaponModel[24], "w_pistol_a.mdl", false) == 0 || strcmp(sWeaponModel[24], "w_pistol_a_dual.mdl", false) == 0 || strcmp(sWeaponModel[24], "w_pistol_b.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_pistol_magnum");
-	else if (strcmp(sWeaponModel[24], "w_desert_eagle.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_pistol_magnum");
-
-	// SMGS
-	else if (strcmp(sWeaponModel[24], "w_smg_uzi.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_smg");
-	else if (strcmp(sWeaponModel[24], "w_smg_a.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_smg_silenced");
-	else if (strcmp(sWeaponModel[24], "w_smg_mp5.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_smg_mp5");
-
-	// TIER 1 SHOTGUNS
-	else if (strcmp(sWeaponModel[24], "w_pumpshotgun_a.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_shotgun_chrome");
-	else if (strcmp(sWeaponModel[24], "w_shotgun.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_pumpshotgun");
-
-	// ASSAULT RIFLES
-	else if (strcmp(sWeaponModel[24], "w_rifle_m16a2.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_rifle");
-	else if (strcmp(sWeaponModel[24], "w_rifle_ak47.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_rifle_ak47");
-	else if (strcmp(sWeaponModel[24], "w_desert_rifle.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_rifle_desert");
-	else if (strcmp(sWeaponModel[24], "w_rifle_sg552.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_rifle_sg552");
-
-	// TIER 2 SHOTGUNS
-	else if (strcmp(sWeaponModel[24], "w_autoshot_m4super.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_autoshotgun");
-	else if (strcmp(sWeaponModel[24], "w_shotgun_spas.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_shotgun_spas");
-
-	// SNIPER RIFLES
-	else if (strcmp(sWeaponModel[24], "w_sniper_mini14.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_hunting_rifle");
-	else if (strcmp(sWeaponModel[24], "w_sniper_military.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_sniper_military");
-	else if (strcmp(sWeaponModel[24], "w_sniper_scout.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_sniper_scout");
-	else if (strcmp(sWeaponModel[24], "w_sniper_awp.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_sniper_awp");
-
-	// TIER 3 WEAPONS
-	else if (strcmp(sWeaponModel[24], "w_grenade_launcher.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_grenade_launcher");
-	else if (strcmp(sWeaponModel[24], "w_m60.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_rifle_m60");
-
-	// GRENADES
-	else if (strcmp(sWeaponModel[24], "w_eq_pipebomb.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_pipe_bomb");
-	else if (strcmp(sWeaponModel[24], "w_eq_molotov.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_molotov");
-	else if (strcmp(sWeaponModel[24], "w_eq_bile_flask.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_vomitjar");
-
-	// MEDICAL ITEMS
-	else if (strcmp(sWeaponModel[24], "w_eq_medkit.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_first_aid_kit");
-	else if (strcmp(sWeaponModel[24], "w_eq_painpills.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_pain_pills");
-	else if (strcmp(sWeaponModel[24], "w_eq_defibrillator.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_defibrillator");
-	else if (strcmp(sWeaponModel[24], "w_eq_adrenaline.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_adrenaline");
-
-	// UPGRADE PACKS
-	else if (strcmp(sWeaponModel[24], "w_eq_incendiary_ammopack.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_upgradepack_incendiary");
-	else if (strcmp(sWeaponModel[24], "w_eq_explosive_ammopack.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_upgradepack_explosive");
-
-	// AMMO PILE
-	else if (strcmp(sWeaponModel[20], "ammo_stack.mdl", false) == 0 || strcmp(sWeaponModel[36], "coffeeammo.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_ammo_spawn");
+	//static char classname[64];
+	//strcopy( classname, sizeof(classname), szOutputBuffer );
 	
-	// CARRIABLE PROPS
-	else if (strcmp(sWeaponModel[18], "gascan001a.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_gascan");
-	else if (strcmp(sWeaponModel[18], "propanecanister001a.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_propanetank");
-	else if (strcmp(sWeaponModel[23], "oxygentank01.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_oxygentank");
-	else if (strcmp(sWeaponModel[18], "gnome.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_gnome");
-	else if (strcmp(sWeaponModel[24], "w_cola.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_cola_bottles");
-	else if (strcmp(sWeaponModel[18], "explosive_box001.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_fireworkcrate");
-
-	// MELEES
-	else if (strcmp(sWeaponModel[21], "w_chainsaw.mdl", false) == 0)
-		strcopy(sBuffer, iMaxLength, "weapon_chainsaw");
-	else
+	if ( !GetEdictClassname(iWeapon, szOutputBuffer, iMaxLength) )
+		return 0;
+	
+	if (!g_bInitWeaponMap)
 	{
-		for (int i = 0; i < sizeof(g_sMeleeWeaponMdls); i++)
+		InitWeaponAndTierMap();
+		PrintToServer("GetWeaponClassname: InitWeaponAndTierMap");
+	}
+	if( g_hWeaponMap.ContainsKey(szOutputBuffer) ) // if it's a weapon name already, just get on with it
+	{
+		//if (g_bCvar_Debug)
+		//PrintToServer("Classname %s exists as key, id %d", szOutputBuffer, iWeapon);
+		
+		return 1;
+	}
+	
+	if (strcmp(szOutputBuffer, "weapon_spawn") == 0)
+	{
+		int iWeaponID = GetEntProp(iWeapon, Prop_Send, "m_weaponID");
+		if (iWeaponID == 0)
 		{
-			if (strcmp(sWeaponModel, g_sMeleeWeaponMdls[i], false) == 0)
-			{
-				strcopy(sBuffer, iMaxLength, "weapon_melee");
-				break;
-			}
+			PushEntityIntoArray(g_hWeaponsToCheckLater, iWeapon);
+			if (g_hCheckWeaponTimer == INVALID_HANDLE)
+				g_hCheckWeaponTimer = CreateTimer(0.1, CheckWeaponsEvenLater);
+			return 0;
+		}
+		
+		strcopy( szOutputBuffer, iMaxLength, IBWeaponName[iWeaponID] );
+		
+		//if (g_bCvar_Debug)
+		//PrintToServer("Got weapon name %s from IBWeaponName for id %d classname %s", IBWeaponName[iWeaponID], iWeapon, classname);
+		
+		return -1;
+	}
+	
+	for (int i = strlen(szOutputBuffer); i > 0; --i)
+    {    
+        if(szOutputBuffer[i] == '_')
+        {
+            szOutputBuffer[i] = EOS;
+            break;
+        }
+    }
+	if( g_hWeaponMap.ContainsKey(szOutputBuffer) )
+	{
+		//if (g_bCvar_Debug)
+		//PrintToServer("Got weapon name %s from WeaponMap for id %d classname %s", szOutputBuffer, iWeapon, classname);
+		
+		return -1;
+	}
+	
+	if(g_iCvar_ItemScavenge_Models)
+	{
+		static char sWeaponModel[PLATFORM_MAX_PATH];
+		GetEntityModelname(iWeapon, sWeaponModel, sizeof(sWeaponModel));
+		
+		if( g_hWeaponMdlMap.GetString(sWeaponModel, szOutputBuffer, iMaxLength) )
+		{
+			//if (g_bCvar_Debug)
+			//	PrintToServer("Judged weapon class %s by model from id %d classname %s!", szOutputBuffer, iWeapon, classname);
+			
+			return -1;
 		}
 	}
-
-	if (sBuffer[0] == 0)
-	{
-		GetEntityClassname(iWeapon, sBuffer, iMaxLength);
-		return false;
-	}
-
-	return true;
+	
+	//if (g_bCvar_Debug)
+	//	PrintToServer("Could not recognize weapon from entity %d %s! buffer %s model %s", iWeapon, classname, szOutputBuffer, sWeaponModel);
+	
+	return 0;
 }
 
-int GetClientSurvivorType(int iClient)
+//	Determine melee ID ""once"" on entity creation
+//	scratch that; volvo gotta mangle entities across multiple frames
+int GetMeleeID(int iEntity, bool bRechecking = false)
+{
+	static char sModelName[64], sEntClassname[64], szOutputBuffer[32];
+	static int iMeleeID;
+	
+	iMeleeID = -1;
+	szOutputBuffer[0] = EOS;
+	
+	GetEdictClassname(iEntity, sEntClassname, sizeof(sEntClassname));
+	if( bRechecking && strncmp(sEntClassname, "weapon_melee", 12) != 0 )
+	{
+		if(g_iCvar_Debug & DEBUG_WEP_DATA)
+			PrintToServer("GetMeleeID: ent %d %s is no more a melee weapon", iEntity, sEntClassname);
+		return -1;
+	}
+	GetEntPropString(iEntity, Prop_Data, "m_ModelName", sModelName, sizeof(sModelName));
+	if(sModelName[0] == EOS)
+	{
+		if(g_iCvar_Debug & DEBUG_WEP_DATA)
+			PrintToServer("GetMeleeID: ent %d %s got no model%s", iEntity, sEntClassname, bRechecking ? " when rechecking!" : "");
+		RequestFrame(RecheckMelee, iEntity);
+		return -1;
+	}
+	
+	g_hMeleeMdlToID.GetString(sModelName, szOutputBuffer, sizeof(szOutputBuffer));
+	g_hMeleeIDs.GetValue(szOutputBuffer, iMeleeID);
+	
+	if(g_iCvar_Debug & DEBUG_WEP_DATA)
+		PrintToServer("GetMeleeID: model %s\nent %d melee #%d %s %s", sModelName, iEntity, iMeleeID, szOutputBuffer, bRechecking ? "(rechecked)" : "");
+	
+	return iMeleeID;
+}
+
+void RecheckMelee(int iEntity)
+{
+	if(IsValidEdict(iEntity))
+		g_iMeleeID[iEntity] = GetMeleeID(iEntity, true);
+}
+
+int GetMeleePreference(int iEntity)
+{
+	static int iMeleeID;
+	
+	if(!g_bInitMeleePrefs) InitMeleePrefs();
+	iMeleeID = g_iMeleeID[iEntity];
+	
+	return (iMeleeID != -1) ? g_iMeleePreference[iMeleeID] : 0;
+}
+
+int GetSurvivorType(int iClient)
 {
 	static char sModelname[PLATFORM_MAX_PATH]; GetClientModel(iClient, sModelname, sizeof(sModelname));
 	switch(sModelname[29])
@@ -4553,31 +5591,30 @@ int GetClientSurvivorType(int iClient)
 	}
 }
 
-bool IsEntityExists(int iEntity)
+bool L4D_IsValidEnt(int iEntity)
 {
 	return (iEntity > 0 && (iEntity <= MAXENTITIES && IsValidEdict(iEntity) || iEntity > MAXENTITIES && IsValidEntity(iEntity)));
 }
 
 bool IsCommonInfected(int iEntity)
 {
-	static char sEntClass[64]; GetEntityClassname(iEntity, sEntClass, sizeof(sEntClass));
+	static char sEntClass[64];
+	GetEntityClassname(iEntity, sEntClass, sizeof(sEntClass));
+
 	return (strcmp(sEntClass, "infected") == 0);
 }
 
-bool IsCommonInfectedAttacking(int iEntity)
+bool IsCommonAttacking(int iEntity)
 {
-	if (HasEntProp(iEntity, Prop_Send, "m_mobRush") && GetEntProp(iEntity, Prop_Send, "m_mobRush") != 0)
-		return true;
-
-	return (HasEntProp(iEntity, Prop_Send, "m_clientLookatTarget") && GetEntProp(iEntity, Prop_Send, "m_clientLookatTarget") != -1);
+	return (GetEntProp(iEntity, Prop_Send, "m_mobRush") == 1 || GetEntProp(iEntity, Prop_Send, "m_clientLookatTarget") != -1);
 }
 
-bool IsCommonInfectedAlive(int iEntity)
+bool IsCommonAlive(int iEntity)
 {
 	return (GetEntProp(iEntity, Prop_Data, "m_lifeState") == 0 && GetEntProp(iEntity, Prop_Send, "m_bIsBurning") == 0);
 }
 
-bool IsCommonInfectedStumbled(int iEntity)
+bool IsCommonStumbling(int iEntity)
 {
 	if (!g_bExtensionActions)return false;
 	return (ActionsManager.GetAction(iEntity, "InfectedShoved") != INVALID_ACTION);
@@ -4585,7 +5622,7 @@ bool IsCommonInfectedStumbled(int iEntity)
 
 int GetFarthestInfected(int iClient, float fDistance = -1.0)
 {
-	int iInfected = -1;
+	int iInfected = 0;
 
 	float fInfectedDist; 
 	float fInfectedPos[3];
@@ -4594,7 +5631,7 @@ int GetFarthestInfected(int iClient, float fDistance = -1.0)
 	int i = INVALID_ENT_REFERENCE;
 	while ((i = FindEntityByClassname(i, "infected")) != INVALID_ENT_REFERENCE)
 	{
-		if (!IsCommonInfectedAlive(i))
+		if (!IsCommonAlive(i))
 			continue;
 		
 		GetEntityCenteroid(i, fInfectedPos);
@@ -4611,7 +5648,7 @@ int GetFarthestInfected(int iClient, float fDistance = -1.0)
 
 void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, float fOverridePos[3] = NULL_VECTOR)
 {
-	float fVisionTime = (bFOVOnly ? g_fSurvivorBot_VisionMemory_Time_FOV[iClient][iEntity] : g_fSurvivorBot_VisionMemory_Time[iClient][iEntity]);
+	float fVisionTime = (bFOVOnly ? g_fBot_VisionMemory_Time_FOV[iClient][iEntity] : g_fBot_VisionMemory_Time[iClient][iEntity]);
 	if (GetGameTime() < fVisionTime)return;
 
 	float fCheckPos[3];
@@ -4626,7 +5663,7 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 	
 	float fMaxDist = 16777216.0;
 
-	int iVisionState = (bFOVOnly ? g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] : g_iSurvivorBot_VisionMemory_State[iClient][iEntity]);
+	int iVisionState = (bFOVOnly ? g_iBot_VisionMemory_State_FOV[iClient][iEntity] : g_iBot_VisionMemory_State[iClient][iEntity]);
 	if (!bFOVOnly)
 	{
 		fNoticeTime = (ClampFloat(0.66 * (fDot / 165.0) + (fEntityDist / fMaxDist), 0.1, 1.5) * g_fCvar_Vision_NoticeTimeScale);
@@ -4635,30 +5672,30 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 			case 0:
 			{
 				if (!bIsVisible)return;
-				g_iSurvivorBot_VisionMemory_State[iClient][iEntity] = 1;
-				g_fSurvivorBot_VisionMemory_Time[iClient][iEntity] = GetGameTime() + fNoticeTime;
+				g_iBot_VisionMemory_State[iClient][iEntity] = 1;
+				g_fBot_VisionMemory_Time[iClient][iEntity] = GetGameTime() + fNoticeTime;
 			}
 			case 1:
 			{
-				g_iSurvivorBot_VisionMemory_State[iClient][iEntity] = (bIsVisible ? 2 : 0);
+				g_iBot_VisionMemory_State[iClient][iEntity] = (bIsVisible ? 2 : 0);
 			}
 			case 2:
 			{
-				if (!bIsVisible)g_iSurvivorBot_VisionMemory_State[iClient][iEntity] = 3;
+				if (!bIsVisible)g_iBot_VisionMemory_State[iClient][iEntity] = 3;
 			}
 			case 3:
 			{
 				if (bIsVisible)
 				{
-					g_iSurvivorBot_VisionMemory_State[iClient][iEntity] = 2;
+					g_iBot_VisionMemory_State[iClient][iEntity] = 2;
 					return;
 				}
 				if ((GetGameTime() - fVisionTime) >= 15.0)
 				{
-					g_iSurvivorBot_VisionMemory_State[iClient][iEntity] = 0;
+					g_iBot_VisionMemory_State[iClient][iEntity] = 0;
 					return;
 				}
-				g_fSurvivorBot_VisionMemory_Time[iClient][iEntity] = GetGameTime() + ClampFloat(fNoticeTime * 0.33, 0.1, fNoticeTime);
+				g_fBot_VisionMemory_Time[iClient][iEntity] = GetGameTime() + ClampFloat(fNoticeTime * 0.33, 0.1, fNoticeTime);
 			}
 		}
 	}
@@ -4670,28 +5707,28 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 			case 0:
 			{
 				if (!bIsVisible)return;
-				g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] = 1;
-				g_fSurvivorBot_VisionMemory_Time_FOV[iClient][iEntity] = GetGameTime() + fNoticeTime;
+				g_iBot_VisionMemory_State_FOV[iClient][iEntity] = 1;
+				g_fBot_VisionMemory_Time_FOV[iClient][iEntity] = GetGameTime() + fNoticeTime;
 			}
 			case 1:
 			{
-				g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] = (bIsVisible ? 2 : 0);
+				g_iBot_VisionMemory_State_FOV[iClient][iEntity] = (bIsVisible ? 2 : 0);
 			}
 			case 2:
 			{
-				if (!bIsVisible)g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] = 3;
+				if (!bIsVisible)g_iBot_VisionMemory_State_FOV[iClient][iEntity] = 3;
 			}
 			case 3:
 			{
-				g_fSurvivorBot_VisionMemory_Time_FOV[iClient][iEntity] = GetGameTime() + fNoticeTime;
+				g_fBot_VisionMemory_Time_FOV[iClient][iEntity] = GetGameTime() + fNoticeTime;
 				if (bIsVisible)
 				{
-					g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] = 2;
+					g_iBot_VisionMemory_State_FOV[iClient][iEntity] = 2;
 					return;
 				}
 				if ((GetGameTime() - fVisionTime) >= 15.0)
 				{
-					g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] = 0;
+					g_iBot_VisionMemory_State_FOV[iClient][iEntity] = 0;
 					return;
 				}
 			}
@@ -4702,7 +5739,7 @@ void CheckEntityForVisibility(int iClient, int iEntity, bool bFOVOnly = false, f
 bool HasVisualContactWithEntity(int iClient, int iEntity, bool bFOVState = true, float fOverridePos[3] = NULL_VECTOR)
 {
 	CheckEntityForVisibility(iClient, iEntity, bFOVState, fOverridePos);
-	int iState = (bFOVState ? g_iSurvivorBot_VisionMemory_State_FOV[iClient][iEntity] : g_iSurvivorBot_VisionMemory_State[iClient][iEntity]);
+	int iState = (bFOVState ? g_iBot_VisionMemory_State_FOV[iClient][iEntity] : g_iBot_VisionMemory_State[iClient][iEntity]);
 	return (iState == 2);
 }
 
@@ -4711,19 +5748,21 @@ stock float ClampFloat(float fValue, float fMin, float fMax)
 	return (fValue > fMax) ? fMax : ((fValue < fMin) ? fMin : fValue);
 }
 
-int GetClosestInfected(int iClient, float fDistance = -1.0)
+stock int GetClosestInfected(int iClient, float fDistance = -1.0)
 {
-	int iCloseInfected = -1;
-	float fInfectedDist, fLastDist = -1.0;
+	static int iInfected, iCloseInfected, iThrownPipeBomb;
+	static float fInfectedDist, fLastDist;
+	static bool bClientIsAttacking, bIsChasingSomething, bBileWasThrown;
 
-	bool bIsChasingSomething = false;
-	int iThrownPipeBomb = (FindEntityByClassname(-1, "pipe_bomb_projectile"));
-	bool bBileWasThrown = (FindEntityByClassname(-1, "info_goal_infected_chase") != -1);
-
-	int iInfected = INVALID_ENT_REFERENCE;
+	bIsChasingSomething = false;
+	iThrownPipeBomb = (FindEntityByClassname(-1, "pipe_bomb_projectile"));
+	bBileWasThrown = (FindEntityByClassname(-1, "info_goal_infected_chase") != -1);
+	iCloseInfected = 0;
+	fLastDist = -1.0;
+	iInfected = INVALID_ENT_REFERENCE;
 	while ((iInfected = FindEntityByClassname(iInfected, "infected")) != INVALID_ENT_REFERENCE)
 	{
-		if (!IsCommonInfectedAlive(iInfected))
+		if (!IsCommonAlive(iInfected))
 			continue;
 
 		fInfectedDist = GetEntityDistance(iClient, iInfected, true);
@@ -4735,7 +5774,7 @@ int GetClosestInfected(int iClient, float fDistance = -1.0)
 		{
 			for (int i = 1; i <= MaxClients; i++)
 			{
-				bIsChasingSomething = (iClient != i && IsClientSurvivor(i) && g_iSurvivorBot_TargetInfected[i] == iInfected && IsWeaponSlotActive(i, 1) && IsEntityExists(g_iSurvivorBot_TargetInfected[i]) && SurvivorHasMeleeWeapon(i) != 0);
+				bIsChasingSomething = (iClient != i && IsClientSurvivor(i) && g_iBot_TargetInfected[i] == iInfected && IsWeaponSlotActive(i, 1) && g_iBot_TargetInfected[i] && SurvivorHasMeleeWeapon(i) != 0);
 				if (bIsChasingSomething)break;
 			}
 		}
@@ -4747,10 +5786,10 @@ int GetClosestInfected(int iClient, float fDistance = -1.0)
 		fLastDist = fInfectedDist;
 	}
 
-	bool bIsAttacking = false;
+	bClientIsAttacking = false;
 	for (iInfected = 1; iInfected <= MaxClients; iInfected++)
 	{
-		if (!IsSpecialInfected(iInfected) || L4D2_GetPlayerZombieClass(iInfected) == L4D2ZombieClass_Tank || bIsAttacking && !IsUsingSpecialAbility(iInfected))
+		if (!IsSpecialInfected(iInfected) || L4D2_GetPlayerZombieClass(iInfected) == L4D2ZombieClass_Tank || bClientIsAttacking && !IsUsingSpecialAbility(iInfected))
 			continue;
 
 		fInfectedDist = GetClientDistance(iClient, iInfected, true);
@@ -4759,7 +5798,7 @@ int GetClosestInfected(int iClient, float fDistance = -1.0)
 
 		iCloseInfected = iInfected;
 		fLastDist = fInfectedDist;
-		bIsAttacking = IsUsingSpecialAbility(iInfected);
+		bClientIsAttacking = IsUsingSpecialAbility(iInfected);
 	}
 
 	return iCloseInfected;
@@ -4767,16 +5806,15 @@ int GetClosestInfected(int iClient, float fDistance = -1.0)
 
 int GetInfectedCount(int iClient, float fDistanceLimit = -1.0, int iMaxLimit = -1, bool bVisible = true, bool bAttackingOnly = true)
 {
-	int iCount;
-
-	float fClientPos[3];
+	static int i, iCount;
+	static float fClientPos[3], fInfectedPos[3];
 	GetEntityCenteroid(iClient, fClientPos);
-
-	float fInfectedPos[3];
-	int i = INVALID_ENT_REFERENCE;
+	
+	i = INVALID_ENT_REFERENCE;
+	iCount = 0;
 	while ((i = FindEntityByClassname(i, "infected")) != INVALID_ENT_REFERENCE)
 	{
-		if (!IsCommonInfectedAlive(i) || bAttackingOnly && !IsCommonInfectedAttacking(i))
+		if (!IsCommonAlive(i) || bAttackingOnly && !IsCommonAttacking(i))
 			continue;
 
 		GetEntityCenteroid(i, fInfectedPos);
@@ -4950,8 +5988,8 @@ bool Base_TraceFilter(int iEntity, int iContentsMask, int iData)
 
 void SwitchWeaponSlot(int iClient, int iSlot)
 {
-	int iWeapon = GetClientWeaponInventory(iClient, iSlot);
-	if (iWeapon == -1 || L4D_GetPlayerCurrentWeapon(iClient) == iWeapon)
+	int iWeapon = GetWeaponInInventory(iClient, iSlot);
+	if (!iWeapon || L4D_GetPlayerCurrentWeapon(iClient) == iWeapon)
 		return;
 
 	static char sWeaponName[64]; GetEdictClassname(iWeapon, sWeaponName, sizeof(sWeaponName));
@@ -4960,60 +5998,49 @@ void SwitchWeaponSlot(int iClient, int iSlot)
 
 bool IsWeaponSlotActive(int iClient, int iSlot)
 {
-	return (GetClientWeaponInventory(iClient, iSlot) == L4D_GetPlayerCurrentWeapon(iClient));
+	return (GetWeaponInInventory(iClient, iSlot) == L4D_GetPlayerCurrentWeapon(iClient));
 }
 
 bool SurvivorHasSMG(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 0);
-	if (iSlot == -1)return false;
-
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	return (strcmp(sWepName[7], "smg") == 0 || strcmp(sWepName[11], "silenced") == 0 || strcmp(sWepName[7], "smg_mp5") == 0);
+	return ( g_iClientInvFlags[iClient] & FLAG_SMG != 0 );
 }
 
 bool SurvivorHasAssaultRifle(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 0);
-	if (iSlot == -1)return false;
+	static int iSlot, iItemFlags;
 
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	return (strcmp(sWepName[7], "rifle") == 0 || strcmp(sWepName[7], "rifle_ak47") == 0 || strcmp(sWepName[7], "rifle_desert") == 0 || strcmp(sWepName[7], "rifle_sg552") == 0);
+	iSlot = GetWeaponInInventory(iClient, 0);
+	if (!iSlot)return false;
+	
+	iItemFlags = g_iClientInvFlags[iClient];
+	return (iItemFlags & FLAG_ASSAULT ? true : false);
 }
 
 int SurvivorHasShotgun(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 0);
-	if (iSlot == -1)return 0;
-
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	return ((strcmp(sWepName[7], "pumpshotgun") == 0 || strcmp(sWepName[7], "shotgun_chrome") == 0) ? 1 : ((strcmp(sWepName[7], "autoshotgun") == 0 || strcmp(sWepName[7], "shotgun_spas") == 0) ? 2 : 0));
+	return ((g_iClientInvFlags[iClient] & FLAG_SHOTGUN != 0) + (g_iClientInvFlags[iClient] & FLAG_SHOTGUN && g_iClientInvFlags[iClient] & FLAG_TIER2));
 }
 
-int SurvivorHasSniperRifle(int iClient)
+// Used to return int, which was unused
+bool SurvivorHasSniperRifle(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 0);
-	if (iSlot == -1)return 0;
-
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	return ((strcmp(sWepName[7], "hunting_rifle") == 0 || strcmp(sWepName[7], "sniper_military") == 0) ? 1 : ((strcmp(sWepName[7], "sniper_awp") == 0 || strcmp(sWepName[7], "sniper_scout") == 0) ? 2 : 0));
+	return (g_iClientInvFlags[iClient] & FLAG_SNIPER != 0);
 }
 
 int SurvivorHasTier3Weapon(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 0);
-	if (iSlot == -1)return 0;
-
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	return (strcmp(sWepName[7], "grenade_launcher") == 0 ? 1 : (strcmp(sWepName[7], "rifle_m60") == 0 ? 2 : 0));
+	return ((g_iClientInvFlags[iClient] & FLAG_TIER3 != 0) + (g_iClientInvFlags[iClient] & FLAG_M60 != 0));
 }
 
 int SurvivorHasGrenade(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 2);
-	if (iSlot == -1)return 0;
+	int iSlot = GetWeaponInInventory(iClient, 2);
+	if (!iSlot)return 0;
 
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
+	static char sWepName[64]; 
+	GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
+
 	switch(sWepName[7])
 	{
 		case 'p': return 1;
@@ -5023,44 +6050,33 @@ int SurvivorHasGrenade(int iClient)
 	}
 }
 
-int SurvivorHasHealthKit(int iClient)
+//returns the same thing! :)
+stock int SurvivorHasHealthKit(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 3);
-	if (iSlot == -1)return false;
-
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	switch(sWepName[7])
-	{
-		case 'f': return 1;
-		case 'd': return 2;
-		case 'u': return 3;
-		default: return 0;
-	}
+	return ((g_iClientInvFlags[iClient] >> 22 & 1) + (g_iClientInvFlags[iClient] >> 20 & 2) + (g_iClientInvFlags[iClient] >> 4 & 1) * 3);
 }
 
 int SurvivorHasMeleeWeapon(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 1);
-	if (iSlot == -1)return 0;
-
-	static char sWepName[64]; GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	return ((strcmp(sWepName[7], "melee") == 0) ? 1 : ((strcmp(sWepName[7], "chainsaw") == 0) ? 2 : 0));
+	return ((g_iClientInvFlags[iClient] >> 6 & 1) + (g_iClientInvFlags[iClient] >> 16 & 1));
 }
 
 int SurvivorHasPistol(int iClient)
 {
-	int iSlot = GetClientWeaponInventory(iClient, 1);
-	if (iSlot == -1)return 0;
+	static int iSlot, iItemFlags;
 
-	static char sWepName[64];  GetEdictClassname(iSlot, sWepName, sizeof(sWepName));
-	if (strcmp(sWepName[7], "pistol") == 0)
-		return ((GetEntProp(iSlot, Prop_Send, "m_isDualWielding") != 0 || GetEntProp(iSlot, Prop_Send, "m_hasDualWeapons") != 0) ? 2 : 1);
-	else if (strcmp(sWepName[7], "pistol_magnum") == 0)
+	iSlot = GetWeaponInInventory(iClient, 1);
+	if (!iSlot || SurvivorHasMeleeWeapon(iClient))
+		return 0;
+
+	iItemFlags = g_iClientInvFlags[iClient];
+	if (iItemFlags & FLAG_PISTOL_EXTRA && !(iItemFlags & FLAG_PISTOL))
 		return 3;
-	return 0;
+	else
+		return ((GetEntProp(iSlot, Prop_Send, "m_isDualWielding") != 0 || GetEntProp(iSlot, Prop_Send, "m_hasDualWeapons") != 0) ? 2 : (iItemFlags & FLAG_PISTOL ? 1 : 0));
 }
 
-int GetSurvivorTeamActiveItemCount(const L4D2WeaponId iWeaponID)
+int GetTeamActiveItemCount(const L4D2WeaponId iWeaponID)
 {
 	int iCount, iWeaponSlot, iCurWeapon;
 	for (int i = 1; i <= MaxClients; i++)
@@ -5068,10 +6084,10 @@ int GetSurvivorTeamActiveItemCount(const L4D2WeaponId iWeaponID)
 		if (!IsClientSurvivor(i))continue;
 		iCurWeapon = L4D_GetPlayerCurrentWeapon(i);
 
-		for (int j = 0; j <= 5; j++)
+		for (int j = 0; j < 5; j++)
 		{
-			iWeaponSlot = GetClientWeaponInventory(i, j);
-			if (IsEntityExists(iWeaponSlot) && iCurWeapon == iWeaponSlot && L4D2_GetWeaponId(iWeaponSlot) == iWeaponID)
+			iWeaponSlot = GetWeaponInInventory(i, j);
+			if (iCurWeapon == iWeaponSlot && L4D2_GetWeaponId(iWeaponSlot) == iWeaponID)
 			{
 				iCount++; 
 				break;
@@ -5083,35 +6099,73 @@ int GetSurvivorTeamActiveItemCount(const L4D2WeaponId iWeaponID)
 
 int GetSurvivorTeamItemCount(const L4D2WeaponId iWeaponID)
 {
-	int iCount, iWeaponSlot;
+	static int iCount, iWeaponSlot;
+	iCount = 0;
+
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (!IsClientSurvivor(i))continue;
+		if (!IsClientSurvivor(i))
+			continue;
 
-		for (int j = 0; j <= 5; j++)
+		for (int j = 0; j < 5; j++)
 		{
-			iWeaponSlot = GetClientWeaponInventory(i, j);
-			if (IsEntityExists(iWeaponSlot) && L4D2_GetWeaponId(iWeaponSlot) == iWeaponID)
+			iWeaponSlot = GetWeaponInInventory(i, j);
+			if (iWeaponSlot && L4D2_GetWeaponId(iWeaponSlot) == iWeaponID)
 			{
 				iCount++; 
 				break;
 			}
 		}
 	}
+	return iCount;
+}
 
+/*
+	Use this whenever you need to count survivors with an item of certain category(inventory flag)
+	e.g. an assault rifle, a melee weapon, a grenade etc
+	
+	Second argument ~ "AND"
+	Sending multiple flags in one argument ~ "OR"
+	Negative argument ~ "NOT", don't put multiple flags under one argument, 
+	e.g.
+	(FLAG_PISTOL | FLAG_PISTOL_EXTRA) will count survivors that carry either pistol(s) or Magnum
+	(FLAG_SHOTGUN, FLAG_TIER1) – survivors with Tier 1 shotguns
+	(-FLAG_PISTOL, FLAG_PISTOL_EXTRA) – survivors with Magnum specifically
+*/
+int GetSurvivorTeamInventoryCount(int iFlag, int iFlag2 = 0)
+{
+	static int iCount;
+	static bool bNegate, bNegate2;
+	
+	bNegate = (iFlag < 0);
+	bNegate2 = (iFlag2 < 0);
+	
+	iCount = 0;
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientSurvivor(i))
+			continue;
+		if ( (bNegate ? ~g_iClientInvFlags[i] & -iFlag : g_iClientInvFlags[i] & iFlag)
+			&& (iFlag2 ? (bNegate2 ? ~g_iClientInvFlags[i] & -iFlag2 : g_iClientInvFlags[i] & iFlag2) : 1) )
+		{
+			iCount++;
+		}
+	}
 	return iCount;
 }
 
 bool IsWeaponReloading(int iWeapon, bool bIgnoreShotguns = true)
 {
-	if (!IsEntityExists(iWeapon) || !HasEntProp(iWeapon, Prop_Data, "m_bInReload"))
+	if (!L4D_IsValidEnt(iWeapon) || !HasEntProp(iWeapon, Prop_Data, "m_bInReload"))
 		return false;
 
 	bool bInReload = !!GetEntProp(iWeapon, Prop_Data, "m_bInReload");
 	if (bInReload && bIgnoreShotguns)
 	{
-		static char sClassname[64]; GetEdictClassname(iWeapon, sClassname, sizeof(sClassname));
-		return (strcmp(sClassname[7], "pumpshotgun") != 0 && strcmp(sClassname[7], "shotgun_chrome") != 0 && strcmp(sClassname[7], "autoshotgun") != 0 && strcmp(sClassname[7], "shotgun_spas") != 0);
+		static int iItemFlags;
+		iItemFlags = g_iItemFlags[iWeapon];
+		
+		return !(iItemFlags & FLAG_SHOTGUN);
 	}
 	return (bInReload);
 }
@@ -5170,7 +6224,7 @@ stock int GetClientRealHealth(int iClient)
 
 bool IsSurvivorBotBlindedByVomit(int iClient)
 {
-	return (GetGameTime() < g_fSurvivorBot_VomitBlindedTime[iClient]);
+	return (GetGameTime() < g_fBot_VomitBlindedTime[iClient]);
 }
 
 stock bool IsEntityOnFire(int iEntity)
@@ -5195,7 +6249,7 @@ stock void SetVectorToZero(float fVec[3])
 
 stock bool GetEntityAbsOrigin(int iEntity, float fResult[3])
 {
-	if (!IsEntityExists(iEntity))return false;
+	if (!L4D_IsValidEnt(iEntity))return false;
 	SDKCall(g_hCalcAbsolutePosition, iEntity);
 	GetEntPropVector(iEntity, Prop_Data, "m_vecAbsOrigin", fResult);
 	return (IsValidVector(fResult));
@@ -5218,6 +6272,11 @@ stock bool GetEntityCenteroid(int iEntity, float fResult[3])
 	fResult[2] += (fMins[2] + fMaxs[2]) * 0.5;
 
 	return true;
+}
+
+bool IntervalHasPassed(float fInterval)
+{
+    return (((GetGameTime() % fInterval) + GetGameFrameTime()) >= fInterval);
 }
 
 void LBI_GetNavAreaCenter(int iNavArea, float fResult[3])
@@ -5425,126 +6484,205 @@ bool LBI_IsPositionInsideCheckpoint(const float fPos[3])
 float GetClientTravelDistance(int iClient, float fGoalPos[3], bool bSquared = false)
 {
 	if (!g_bMapStarted)return -1.0;
+	
+	static bool bIsReachable;
+	static int iStartArea, iGoalArea, iArea, iCount;
+	static float t;
 
-	int iStartArea = g_iClientNavArea[iClient];
-	if (!iStartArea)return -1.0;
-
-	int iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true, GetClientTeam(iClient));
-	if (!iGoalArea)return -1.0;
-
-	if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), 0.0, GetClientTeam(iClient), false))
+	StartProfiling(g_pProf);
+	iStartArea = g_iClientNavArea[iClient];
+	if (!iStartArea)
+	{
+		StopProfiling(g_pProf);
+		t = GetProfilerTime(g_pProf);
+		if(g_iCvar_Debug & DEBUG_NAV && t > 0.001)
+			PrintToServer("GetClientTravelDist took %.8f seconds !iStartArea", t);
 		return -1.0;
+	}
 
-	int iArea = LBI_GetNavAreaParent(iGoalArea);
-	if (!iArea)return GetVectorDistance(g_fClientAbsOrigin[iClient], fGoalPos, bSquared);
+	iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, false, GetClientTeam(iClient)); // need to think about which checkLOS and checkGround bools to put here
+	if (!iGoalArea)
+	{
+		StopProfiling(g_pProf);
+		t = GetProfilerTime(g_pProf);
+		if(g_iCvar_Debug & DEBUG_NAV && t > 0.001)
+			PrintToServer("GetClientTravelDist took %.8f seconds !iGoalArea", t);
+		return -1.0;
+	}
+
+	//if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), 0.0, GetClientTeam(iClient), false))
+	bIsReachable = L4D2_IsReachable(iClient, fGoalPos);
+	if (!bIsReachable)
+	{
+		StopProfiling(g_pProf);
+		t = GetProfilerTime(g_pProf);
+		if(g_iCvar_Debug & DEBUG_NAV && t > 0.001)
+		{
+			char sClientName[128];
+			GetClientName(iClient, sClientName, sizeof(sClientName));
+			PrintToServer("GetClientTravelDist took %.8f seconds !IsReachable, Client %s, bIsReachable %b, fGoalPos %.1f %.1f %.1f", t, sClientName, bIsReachable, fGoalPos[0], fGoalPos[1], fGoalPos[2]);
+		}
+		return -1.0;
+	}
+
+	iArea = LBI_GetNavAreaParent(iGoalArea);
+	if (!iArea)
+	{
+		StopProfiling(g_pProf);
+		t = GetProfilerTime(g_pProf);
+		if(g_iCvar_Debug & DEBUG_NAV && t > 0.001)
+			PrintToServer("GetClientTravelDist took %.8f seconds !iArea", t);
+		return GetVectorDistance(g_fClientAbsOrigin[iClient], fGoalPos, bSquared);
+	}
 
 	float fClosePoint[3]; LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
 	float fDistance = GetVectorDistance(fClosePoint, fGoalPos, bSquared);
-
 	float fParentCenter[3];
+	
+	iCount = 0;
 	for (; LBI_GetNavAreaParent(iArea); iArea = LBI_GetNavAreaParent(iArea))
 	{
+		if (iCount > 50)
+			break;
 		LBI_GetClosestPointOnNavArea(LBI_GetNavAreaParent(iArea), fGoalPos, fParentCenter);
 		LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
 		fDistance += GetVectorDistance(fClosePoint, fParentCenter, bSquared);
+		iCount++;
 	}
+	//if(g_bCvar_Debug && iCount > 20)
+	//	PrintToServer("GetClientTravelDist %d iterations of lag loop", iCount);
 
 	LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
 	fDistance += GetVectorDistance(g_fClientAbsOrigin[iClient], fClosePoint, bSquared);
 	
+	StopProfiling(g_pProf);
+	t = GetProfilerTime(g_pProf);
+	if(g_iCvar_Debug & DEBUG_NAV && t > 0.001)
+	{
+		char sClientName[128];
+		GetClientName(iClient, sClientName, sizeof(sClientName));
+		PrintToServer("GetClientTravelDist took %.8f seconds, iCount %d, Client %s, bIsReachable %b, fDistance %.2f, fGoalPos %.1f %.1f %.1f",
+			t, iCount, sClientName, bIsReachable, fDistance, fGoalPos[0], fGoalPos[1], fGoalPos[2]);
+	}
 	return fDistance;
 }
 
-float GetEntityTravelDistance(int iClient, int iEntity, bool bSquared = false)
+float GetClientDistanceToItem(int iClient, int iEntity, bool bIgnoreNavBlockers = true)
 {
-	if (!g_bMapStarted)return -1.0;
-
-	int iStartArea, iTeam; float fEntityPos[3];
-	if (IsValidClient(iClient))
-	{
-		iTeam = GetClientTeam(iClient);
-		iStartArea = g_iClientNavArea[iClient];
-		fEntityPos = g_fClientAbsOrigin[iClient];
-	}
-	else
-	{
-		GetEntityAbsOrigin(iClient, fEntityPos);
-		iStartArea = L4D_GetNearestNavArea(fEntityPos, _, true, true, true, iTeam);
-	}
-	if (!iStartArea)return -1.0;
-
-	int iGoalArea; float fTargetPos[3];
-	if (IsValidClient(iEntity))
-	{
-		iGoalArea = g_iClientNavArea[iEntity];
+	if (!g_bMapStarted)
+		return -1.0;
+	
+	static bool bIsReachable;
+	static int iGoalArea;
+	static float fDistance, fEntityPos[3], fTargetPos[3]/*, t*/;
+	
+	//StartProfiling(g_pProf);
+	//get or calculate target position
+	iGoalArea = 0;
+	if(IsValidClient(iEntity))
 		fTargetPos = g_fClientAbsOrigin[iEntity];
-	}
 	else
 	{
-		GetEntityAbsOrigin(iEntity, fTargetPos);
-		iGoalArea = L4D_GetNearestNavArea(fTargetPos, _, true, true, true, iTeam);
+		GetEntityAbsOrigin(iEntity, fEntityPos);
+		iGoalArea = L4D_GetNearestNavArea(fEntityPos, 300.0, true, true, false, GetClientTeam(iClient));
+		if (!iGoalArea)
+			return -1.0;
+		LBI_GetClosestPointOnNavArea(iGoalArea, fTargetPos, fTargetPos);
 	}
-	if (!iGoalArea)return -1.0;
 	
-	if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), 0.0, iTeam, false))
-		return -1.0;
-
-	int iArea = LBI_GetNavAreaParent(iGoalArea);
-	if (!iArea)return GetVectorDistance(g_fClientAbsOrigin[iClient], fEntityPos, bSquared);
-
-	float fClosePoint[3]; LBI_GetClosestPointOnNavArea(iArea, fEntityPos, fClosePoint);
-	float fDistance = GetVectorDistance(fClosePoint, fEntityPos, bSquared);
-
-	float fParentCenter[3];
-	for (; LBI_GetNavAreaParent(iArea); iArea = LBI_GetNavAreaParent(iArea))
+	//if bot, use L4D2_IsReachable
+	if (IsFakeClient(iClient))
 	{
-		LBI_GetClosestPointOnNavArea(LBI_GetNavAreaParent(iArea), fEntityPos, fParentCenter);
-		LBI_GetClosestPointOnNavArea(iArea, fEntityPos, fClosePoint);
-		fDistance += GetVectorDistance(fClosePoint, fParentCenter, bSquared);
+		bIsReachable = L4D2_IsReachable(iClient, fEntityPos);
+		if (!bIsReachable)
+			return -1.0;
 	}
 
-	LBI_GetClosestPointOnNavArea(iArea, fEntityPos, fClosePoint);
-	fDistance += GetVectorDistance(g_fClientAbsOrigin[iClient], fClosePoint, bSquared);
+	fDistance = L4D2_NavAreaTravelDistance(g_fClientAbsOrigin[iClient], fTargetPos, bIgnoreNavBlockers);
+	if (iGoalArea)
+		fDistance += GetVectorDistance(fTargetPos, fEntityPos, false);
+	
+	//StopProfiling(g_pProf);
+	//t = GetProfilerTime(g_pProf);
+	//if(g_bCvar_Debug && t > 0.001)
+	//{
+	//	char sClientName[128], sClassname[64];
+	//	GetClientName(iClient, sClientName, sizeof(sClientName));
+	//	GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
+	//	PrintToServer("GetClientDistanceToItem took %.8f seconds, %d Client %s, Target %s, fDistance %.2f, fTargetPos %.1f %.1f %.1f", t, iClient, sClientName, sClassname, fDistance, fTargetPos[0], fTargetPos[1], fTargetPos[2]);
+	//}
 	
 	return fDistance;
 }
 
-float GetVectorTravelDistance(float fStartPos[3], float fGoalPos[3], bool bSquared = false, float fMaxLength = 2048.0, int iTeam = 2)
+//to replace GetVectorTravelDistance()
+float GetNavDistance(float fStartPos[3], float fGoalPos[3], int iEntity = -1, bool bCheckLOS = true)
 {
 	if (!g_bMapStarted)return -1.0;
-
-	int iStartArea = L4D_GetNearestNavArea(fStartPos, _, true, true, true, iTeam);
-	if (!iStartArea)return -1.0;
 	
-	int iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true, iTeam);
-	if (!iGoalArea)return -1.0;
-
-	if (!L4D2_NavAreaBuildPath(view_as<Address>(iStartArea), view_as<Address>(iGoalArea), fMaxLength, iTeam, false))
-		return -1.0;
-
-	int iArea = LBI_GetNavAreaParent(iGoalArea);
-	if (!iArea)return GetVectorDistance(fStartPos, fGoalPos, bSquared);
-
-	float fClosePoint[3]; LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
-	float fDistance = GetVectorDistance(fClosePoint, fGoalPos, bSquared);
-
-	float fParentCenter[3];
-	for (; LBI_GetNavAreaParent(iArea); iArea = LBI_GetNavAreaParent(iArea))
+	static int iStartArea, iGoalArea;
+	static float fDistance;
+	static char sEntClassname[64];
+	
+	sEntClassname[0] = EOS;
+	if (iEntity != -1)
+		GetEntityClassname(iEntity, sEntClassname, sizeof(sEntClassname));
+	
+	if (iEntity != -1 && g_hBadPathEntities.FindValue(EntIndexToEntRef(iEntity)) != -1)
 	{
-		LBI_GetClosestPointOnNavArea(LBI_GetNavAreaParent(iArea), fGoalPos, fParentCenter);
-		LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
-		fDistance += GetVectorDistance(fClosePoint, fParentCenter, bSquared);
+		if(g_iCvar_Debug & DEBUG_NAV)
+			PrintToServer("GetNavDistance: entity %d %s is in bad pathing table", iEntity, sEntClassname);
+		return -1.0;
 	}
 
-	LBI_GetClosestPointOnNavArea(iArea, fGoalPos, fClosePoint);
-	fDistance += GetVectorDistance(fStartPos, fClosePoint, bSquared);
+	iStartArea = L4D_GetNearestNavArea(fStartPos, 140.0, true, bCheckLOS, false, 2);
+	if (!iStartArea)
+	{
+		if(g_iCvar_Debug & DEBUG_NAV)
+			PrintToServer("GetNavDistance: could not find iStartArea, fStartPos %.2f %.2f %.2f ent %d %s", fStartPos[0], fStartPos[1], fStartPos[2], iEntity, sEntClassname);
+		if(iEntity != -1)
+			PushEntityIntoArray(g_hBadPathEntities, iEntity);
+		return -1.0;
+	}
+	
+	iGoalArea = L4D_GetNearestNavArea(fGoalPos, 140.0, true, bCheckLOS, false, 2);
+	if (!iGoalArea)
+	{
+		if(g_iCvar_Debug & DEBUG_NAV)
+			PrintToServer("GetNavDistance: could not find iGoalArea, fGoalPos %.2f %.2f %.2f ent %d %s", fGoalPos[0], fGoalPos[1], fGoalPos[2], iEntity, sEntClassname);
+		if(iEntity != -1)
+			PushEntityIntoArray(g_hBadPathEntities, iEntity);
+		return -1.0;
+	}
+	else
+	{
+		LBI_GetClosestPointOnNavArea(iGoalArea, fGoalPos, fGoalPos);
+	}
+	
+	fDistance = L4D2_NavAreaTravelDistance(fStartPos, fGoalPos, true);
+	if (g_iCvar_Debug & DEBUG_NAV && fDistance < 0.0)
+		PrintToServer("GetNavDistance: fDistance %.2f fStartPos %.2f %.2f %.2f ent %d %s", fDistance, fStartPos[0], fStartPos[1], fStartPos[2], iEntity, sEntClassname);
+	
+	if (iEntity != -1 && fDistance < 0.0)
+	{
+		PushEntityIntoArray(g_hBadPathEntities, iEntity);
+		if (g_hClearBadPathTimer == INVALID_HANDLE)
+			g_hClearBadPathTimer = CreateTimer(0.1, ClearBadPathEntsTable);
+	}
 	
 	return fDistance;
+}
+
+public Action ClearBadPathEntsTable(Handle timer)
+{
+	g_hBadPathEntities.Clear();
+	g_hClearBadPathTimer = INVALID_HANDLE;
+	return Plugin_Handled;
 }
 
 bool LBI_GetBonePosition(int iEntity, const char[] sBoneName, float fBuffer[3])
 {
-	if (!IsEntityExists(iEntity))return false;
+	if (!L4D_IsValidEnt(iEntity))return false;
 
 	int iBoneIndex = SDKCall(g_hLookupBone, iEntity, sBoneName);
 	if (iBoneIndex == -1)return false;
@@ -5579,15 +6717,16 @@ bool LBI_IsReachableNavArea(int iClient, int iGoalArea, int iStartArea = -1)
 	return (iStartArea && (iStartArea == iGoalArea || SDKCall(g_hIsReachableNavArea, iClient, iStartArea, iGoalArea)));
 }
 
-bool LBI_IsReachablePosition(int iClient, const float fPos[3])
+// don't fucking break the game if the position is 1mm inside of a prop, or 1mm below ground, a'ight??
+bool LBI_IsReachablePosition(int iClient, const float fPos[3], bool bCheckLOS = true)
 {
-	int iNearArea = L4D_GetNearestNavArea(fPos, 200.0, true, true, false, 0);
+	int iNearArea = L4D_GetNearestNavArea(fPos, 200.0, true, bCheckLOS, false, 0);
 	return (iNearArea && LBI_IsReachableNavArea(iClient, iNearArea));
 }
 
 bool LBI_IsReachableEntity(int iClient, int iEntity)
 {
-	if (!IsEntityExists(iEntity) || IsValidClient(iEntity) && !g_iClientNavArea[iEntity])return false;
+	if (!L4D_IsValidEnt(iEntity) || IsValidClient(iEntity) && !g_iClientNavArea[iEntity])return false;
 	float fEntityPos[3]; GetEntityAbsOrigin(iEntity, fEntityPos);
 	return (LBI_IsReachablePosition(iClient, fEntityPos));
 }
@@ -5596,27 +6735,31 @@ MRESReturn DTR_OnSurvivorBotGetAvoidRange(int iClient, Handle hReturn, Handle hP
 {
 	int iTarget = DHookGetParam(hParams, 1); 
 	float fAvoidRange = DHookGetReturn(hReturn);
-	float fInitRange = DHookGetReturn(hReturn);
+	float fInitRange = fAvoidRange;
 
 	if (fAvoidRange == 125.0)
 	{
 		if (iTarget <= MaxClients)
 		{
-			fAvoidRange = ((!IsUsingSpecialAbility(iTarget) && IsValidClient(L4D_GetPinnedSurvivor(iTarget))) ? 0.0 : 200.0);
+			if (g_bCvar_Nightmare && L4D2_GetPlayerZombieClass(iTarget) == L4D2ZombieClass_Jockey)
+				fAvoidRange = 500.0;
+			else
+				fAvoidRange = ((!IsUsingSpecialAbility(iTarget) && IsValidClient(L4D_GetPinnedSurvivor(iTarget))) ? 0.0 : 200.0);
+
 		}
 		else if (SurvivorHasMeleeWeapon(iClient))
 		{
-			fAvoidRange = 0.0;
+			fAvoidRange = 50.0;
 		}
 	}
 	else if (fAvoidRange == 450.0)
 	{
 		int iVictim = g_iInfectedBot_CurrentVictim[iTarget];
-		fAvoidRange = ((iVictim == iClient || iVictim > 0 && GetClientDistance(iVictim, iClient, true) <= 160000.0) ? 700.0 : 300.0);
+		fAvoidRange = ((iVictim == iClient || iVictim > 0 && GetClientDistance(iVictim, iClient, true) <= 160000.0) ? 700.0 : 300.0); // 400
 	}
-	else if (fAvoidRange == 300.0 && g_iSurvivorBot_WitchTarget[iClient] != -1 && g_bSurvivorBot_IsWitchHarasser[iClient])
+	else if (fAvoidRange == 300.0 && g_iBot_WitchTarget[iClient] != -1 && g_bBot_IsWitchHarasser[iClient])
 	{
-		fAvoidRange = 800.0;
+		fAvoidRange = 750.0;
 	}
 
 	if (IsSurvivorCarryingProp(iClient))
@@ -5624,7 +6767,7 @@ MRESReturn DTR_OnSurvivorBotGetAvoidRange(int iClient, Handle hReturn, Handle hP
 		fAvoidRange += 200.0;
 	}
 
-	//PrintToServer("%N = %i, %f/%f", iClient, iTarget, fAvoidRange, fInitRange);
+	// PrintToServer("%N = %i, %f/%f", iClient, iTarget, fAvoidRange, fInitRange);
 
 	if (fInitRange != fAvoidRange)
 	{
@@ -5661,25 +6804,36 @@ MRESReturn DTR_OnInfernoTouchNavArea(int iInferno, Handle hReturn, Handle hParam
 	if (bCanBlock)
 		SDKCall(g_hMarkNavAreaAsBlocked, iNavArea, 2, iInferno, true);
 
-	/* Breaks the map scripts (might make it work only in non-coop maps only...)
-	float fNWCorner[3], fSECorner[3];
-	LBI_GetNavAreaCorners(iNavArea, fNWCorner, fSECorner);
-	if ((fSECorner[0] - fNWCorner[0]) > 100.0 || (fSECorner[1] - fNWCorner[1]) > 100.0)
-	{
-		SDKCall(g_hSubdivideNavArea, L4D_GetPointer(POINTER_NAVMESH), iNavArea, true, true, 1);
-	}
-	*/
-
 	return MRES_Ignored;
 }
 
 MRESReturn DTR_OnFindUseEntity(int iClient, Handle hReturn, Handle hParams)
 {
+	static int iScavengeItem;
+	static float fDistance, fScavengePos[3];
+
 	if (!IsValidClient(iClient) || !IsFakeClient(iClient))
 		return MRES_Ignored;
 
-	int iScavengeItem = g_iSurvivorBot_ScavengeItem[iClient];
-	if (!IsEntityExists(iScavengeItem))return MRES_Ignored;
+	iScavengeItem = g_iBot_ScavengeItem[iClient];
+	if (!L4D_IsValidEnt(iScavengeItem))
+		return MRES_Ignored;
+
+	GetEntityCenteroid(iScavengeItem, fScavengePos);
+	fDistance = GetVectorDistance(g_fClientEyePos[iClient], fScavengePos, true);
+
+	if (fDistance > g_fCvar_ItemScavenge_PickupRange_Sqr)
+	{
+		// if (g_iCvar_Debug & DEBUG_SCAVENGE && (!g_iCvar_DebugClient || iClient == g_iCvar_DebugClient))
+		// {
+		// 	static char szEntClassname[64]; 
+		// 	GetEdictClassname(iScavengeItem, szEntClassname, sizeof(szEntClassname));
+
+		// 	PrintToServer("DTR_OnFindUseEntity: Preventing %N from grabbing %s, distance %.2f", iClient, szEntClassname, SquareRoot(fDistance));
+		// }
+
+		return MRES_Ignored;
+	}
 
 	DHookSetReturn(hReturn, iScavengeItem);
 	return MRES_ChangedOverride;
@@ -5689,12 +6843,16 @@ int LBI_IsPathToPositionDangerous(int iClient, float fGoalPos[3])
 {
 	if (!g_bMapStarted)return -1;
 
+	static int iClientArea, iGoalArea, iParent, iCount, iTank;
+	static float fTankDist, fGoalDist, fGoalOffset[3], fAreaPos[3];
+	
 	if (L4D2_IsTankInPlay())
 	{
 		ArrayList hTankList = new ArrayList();
-		float fGoalOffset[3]; fGoalOffset = fGoalPos; fGoalOffset[2] += HUMAN_HALF_HEIGHT;
+		
+		fGoalOffset = fGoalPos;
+		fGoalOffset[2] += HUMAN_HALF_HEIGHT;
 
-		float fTankDist, fGoalDist;
 		for (int i = 1; i <= MaxClients; i++)
 		{
 			if (i == iClient || !IsClientInGame(i) || !IsPlayerAlive(i) || L4D2_GetPlayerZombieClass(i) != L4D2ZombieClass_Tank || L4D_IsPlayerIncapacitated(i))
@@ -5720,32 +6878,38 @@ int LBI_IsPathToPositionDangerous(int iClient, float fGoalPos[3])
 			hTankList.Push(i);
 		}
 
-		int iClientArea = g_iClientNavArea[iClient];
+		iClientArea = g_iClientNavArea[iClient];
 		if (!iClientArea)
 		{
 			delete hTankList;
 			return -1;
 		}
 
-		int iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true);
+		iGoalArea = L4D_GetNearestNavArea(fGoalPos, _, true, true, true);
 		if (!iGoalArea)
 		{
 			delete hTankList;
 			return -1;
 		}
 
-		if (!L4D2_NavAreaBuildPath(view_as<Address>(iClientArea), view_as<Address>(iGoalArea), 0.0, 2, false))
+		//(!L4D2_NavAreaBuildPath(view_as<Address>(iClientArea), view_as<Address>(iGoalArea), 0.0, 2, false))
+		if (!L4D2_IsReachable(iClient, fGoalPos))
 		{
 			delete hTankList;
 			return -1;
 		}
-
-		int iParent = LBI_GetNavAreaParent(iGoalArea);
+		
+		iParent = LBI_GetNavAreaParent(iGoalArea);
 		if (iParent)
 		{
-			int iTank; float fAreaPos[3];
+			iCount = 0;
 			for (; LBI_GetNavAreaParent(iParent); iParent = LBI_GetNavAreaParent(iParent))
 			{
+				if (iCount > 25)
+					//i ain't calculating all that
+					//happy for you though
+					//or sorry that happened
+					break;
 				for (int i = 0; i < hTankList.Length; i++)
 				{
 					iTank = hTankList.Get(i);
@@ -5759,9 +6923,11 @@ int LBI_IsPathToPositionDangerous(int iClient, float fGoalPos[3])
 					delete hTankList;
 					return (g_iInfectedBot_CurrentVictim[iTank] == iClient ? iTank : 0);
 				}
+				iCount++;
 			}
+			if(g_iCvar_Debug & DEBUG_NAV && iCount > 10)
+				PrintToServer("IsPathToPositionDangerous: %d iterations of lag loop", iCount);
 		}
-
 		delete hTankList;
 	}
 
@@ -5802,6 +6968,7 @@ Action OnRegroupWithTeamAction(BehaviorAction hAction, int iActor, float fInterv
 	}
 
 	hResult.type = DONE;
+	hResult.action = INVALID_ACTION;
 	return Plugin_Changed;
 }
 
@@ -5822,6 +6989,7 @@ Action OnMoveToIncapacitatedFriendAction(BehaviorAction hAction, int iActor, flo
 	}
 
 	hResult.type = DONE;
+	hResult.action = INVALID_ACTION;
 	return Plugin_Changed;
 }
 
