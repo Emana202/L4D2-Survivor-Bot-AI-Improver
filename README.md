@@ -1,4 +1,4 @@
-# PROJECT IS CURRENTLY (mostly) UNMAINTAINED;
+# PROJECT IS CURRENTLY (slowly, but surely, sometimes, maybe?) MAINTAINED!!!
 
 ---
 
