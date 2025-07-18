@@ -53,7 +53,7 @@ A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survi
 3. Extract the `sourcemod` folder from Left 4 DHooks Direct inside the `addons` folder;
 4. If you chose to install Actions, extract the folders inside the archive to the `addons/sourcemod/` folder;
 5. Download the zip file of this repository;
-6. Put the `gamedata`, "plugins`, `data`, and `scripting` folders inside `addons/sourcemod`.
+6. Put the `gamedata`, `plugins`, `data`, and `scripting` folders inside `addons/sourcemod`.
 
 ---
 
