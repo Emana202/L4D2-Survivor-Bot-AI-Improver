@@ -43,22 +43,23 @@ A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survi
 - **SourceMod 1.12:** https://www.sourcemod.net/downloads.php?branch=stable
 - **Left 4 DHooks Direct:** https://forums.alliedmods.net/showthread.php?t=321696
 - **Actions (Optional - Fixes bots always rushing to save their incapped friend or stopping to retreat in tank battle ):** https://forums.alliedmods.net/showpost.php?p=2771520&postcount=1
+- [**VScript by FortyTwoFortyTwo**](https://github.com/FortyTwoFortyTwo/VScript) (Optional, has it's own requirements. **Seems to cause crashes on map load when playing with [Left 4 Bots 2](https://steamcommunity.com/sharedfiles/filedetails/?id=3022416274) installed**)
 
 ---
 
 ## Installation
 1. Download the files in the Requirements section;
-2. Extract the files from SourceMod and MetaMod's archives inside your game folder (Ex. C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2\left4dead2);
-3. Extract the "sourcemod" folder from Left 4 DHooks Direct inside the "addons" folder;
-4. If you chose to install Actions, extract the folders inside the archive to the "addons/sourcemod/" folder;
+2. Extract the files from SourceMod and MetaMod's archives inside your game folder (Ex. `C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2\left4dead2`);
+3. Extract the `sourcemod` folder from Left 4 DHooks Direct inside the `addons` folder;
+4. If you chose to install Actions, extract the folders inside the archive to the `addons/sourcemod/` folder;
 5. Download the zip file of this repository;
-6. Put the "gamedata", "plugins", "data", and "scripting" folders inside "addons/sourcemod".
+6. Put the `gamedata`, "plugins`, `data`, and `scripting` folders inside `addons/sourcemod`.
 
 ---
 
 ## Note for Left 4 Bots 2 Users
-If you're gonna use this plugin alongside [Left 4 Bots 2](https://steamcommunity.com/sharedfiles/filedetails/?id=3022416274) addon, the make sure to change some of its settings (located in "<game folder>/left4dead2/ems/left4bots2/cfg") so that it doesn't conflict with the plugin's:
-- Inside "weapons" folder, you'll find the addon's weapons preferences for each survivor. Open each text file with any editor and make sure that the lines with written weapons and items start with "\*,". For example:
+If you're gonna use this plugin alongside [Left 4 Bots 2](https://steamcommunity.com/sharedfiles/filedetails/?id=3022416274) addon, the make sure to change some of its settings (located in `(game installation path)/left4dead2/ems/left4bots2/cfg`) so that it doesn't conflict with the plugin's:
+- Inside `weapons` folder, you'll find the addon's weapons preferences for each survivor. Open each text file with any editor and make sure that the lines with written weapons and items start with "\*,". For example:
 	- \*,sniper_military,hunting_rifle,rifle_ak47,rifle_sg552,rifle,rifle_desert,autoshotgun,shotgun_spas,rifle_m60,grenade_launcher,sniper_scout,sniper_awp,smg,smg_silenced,smg_mp5,shotgun_chrome,pumpshotgun
 	- \*,pistol_magnum,pistol,chainsaw,machete,golfclub,katana,fireaxe,crowbar,cricket_bat,baseball_bat,tonfa,shovel,electric_guitar,knife,frying_pan,pitchfork,riotshield
 	- \*,molotov,pipe_bomb,vomitjar
@@ -82,8 +83,28 @@ If you're gonna use this plugin alongside [Left 4 Bots 2](https://steamcommunity
 
 ---
 
+## Note When Compiling
+If you try to compile the .sp file, you're gonna get the errors of the following format: `error 021: symbol already defined: "fieldtype_t"`. To fix this, after installing Left 4 DHooks Direct, open the "scripting/include" folder, find "left4dhooks.inc" and make a copy of it, renaming it "left4dhooks_vscript.inc". Open the duplicated file and search for the following lines inside:
+```
+enum fieldtype_t
+{
+	FIELD_VOID = 0,				// No type or value
+	FIELD_FLOAT = 1,			// Any floating point value
+	FIELD_VECTOR = 3,			// Any vector, QAngle, or AngularImpulse
+	FIELD_INTEGER = 5,			// Any integer or enum
+	FIELD_BOOLEAN = 6,			// boolean, implemented as an int, I may use this as a hint for compression
+	FIELD_CHARACTER = 8,		// a byte
+	FIELD_CSTRING = 31,
+	FIELD_UNSIGNED = 38,
+	FIELD_QANGLE = 40
+};
+```
+Either remove them, or commented them out. Once done, replace `#include <left4dhooks>` in .sp file with `#include <left4dhooks_vscript>`. After that, it should compile without issues.
+
+---
+
 ## Configuration Settings
-Config file is created after starting any campaign with plugin enabled at least once and is located in "(Game installation path)/left4dead2/cfg/sourcemod/l4d2_improved_bots.cfg"
+Config file is created after starting any campaign with plugin enabled at least once and is located in `(game installation path)/left4dead2/cfg/sourcemod/l4d2_improved_bots.cfg`
 
 ```
 // If your server has weapons with modified ammo types/amounts, put them here in a following format: "weapon_id:ammo_max weapon_id:ammo_max ..."
@@ -121,9 +142,9 @@ ib_debug "0"
 
 // Range at which survivor's dead body should be for bot to consider it reviveable.
 // -
-// Default: "2000"
+// Default: "2500"
 // Minimum: "0.000000"
-ib_defib_revive_distance "2000"
+ib_defib_revive_distance "2500"
 
 // Enable bots reviving dead players with defibrillators if they have one available.
 // -
@@ -162,9 +183,9 @@ ib_evade_spit "1"
 
 // Distance at which a not visible item should be for bot to move it.
 // -
-// Default: "300"
+// Default: "250"
 // Minimum: "0.000000"
-ib_grab_distance "300"
+ib_grab_distance "250"
 
 // Enable improved bot item scavenging for specified items.
 // <0: Disabled, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defib, 32: UpgradePack, 64: Pills, 128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons. Add numbers together>
@@ -201,9 +222,9 @@ ib_grab_pickup_distance "90"
 
 // Distance at which a visible item should be for bot to move it.
 // -
-// Default: "600"
+// Default: "500"
 // Minimum: "0.000000"
-ib_grab_visible_distance "600"
+ib_grab_visible_distance "500"
 
 // Enables survivor bots throwing grenades.
 // -
@@ -242,7 +263,7 @@ ib_gren_throw_range "1500"
 // Maximum: "7.000000"
 ib_gren_types "7"
 
-// If the survivor bot's primary ammo percentage is above this value, they'll consider that they have enough ammo before refill
+// If the survivor bot's primary ammo percentage is above this value, they'll consider that they have enough ammo before replacement
 // -
 // Default: "0.33"
 // Minimum: "0.000000"
@@ -258,9 +279,9 @@ ib_help_pinned_enabled "3"
 
 // Range at which bots will start firing at SI.
 // -
-// Default: "1000"
+// Default: "1250"
 // Minimum: "0.000000"
-ib_help_pinned_shootrange "1000"
+ib_help_pinned_shootrange "1250"
 
 // Range at which bots will start to bash SI.
 // -
@@ -276,9 +297,9 @@ ib_melee_aim_range "125"
 
 // Range at which bot's target should be to approach it. <0: Disable Approaching>
 // -
-// Default: "125"
+// Default: "250"
 // Minimum: "0.000000"
-ib_melee_approach_range "125"
+ib_melee_approach_range "250"
 
 // Range at which bot's target should be to start attacking it.
 // -
@@ -294,9 +315,9 @@ ib_melee_chainsaw_limit "1"
 
 // The nearby infected count required for bot to switch to chainsaw.
 // -
-// Default: "8"
+// Default: "7"
 // Minimum: "1.000000"
-ib_melee_chainsaw_switch_count "8"
+ib_melee_chainsaw_switch_count "7"
 
 // Enables survivor bots' improved melee behaviour.
 // -
@@ -336,12 +357,19 @@ ib_melee_switch_range "200"
 // Maximum: "1.000000"
 ib_mix_grenades "0"
 
+// If enabled, bots will try to not have a whole team consist of only SMGs or shotguns and pick up different ones if too much.
+// -
+// Default: "1"
+// Minimum: "0.000000"
+// Maximum: "1.000000"
+ib_mix_primaries_t1 "1"
+
 // Makes survivor bots change their primary weapon subtype if there's too much of the same one, Ex. change AK-47 to M16 or SPAS-12 to Autoshotgun.
 // -
 // Default: "0"
 // Minimum: "0.000000"
 // Maximum: "1.000000"
-ib_mix_primaries "0"
+ib_mix_primaries_t2 "0"
 
 // Enable if you're playing on NIGHTMARE modpack! Adjusts the bot's behaviors to fit better to it
 // -
@@ -493,9 +521,9 @@ ib_targeting_ignoredociles "1"
 
 // Range at which target need to be for bots to start firing at it.
 // -
-// Default: "1500"
+// Default: "1750"
 // Minimum: "0.000000"
-ib_targeting_range "1500"
+ib_targeting_range "1750"
 
 // Range at which target need to be for bots to start firing at it with secondary weapon.
 // -
@@ -505,9 +533,9 @@ ib_targeting_range_pistol "1000"
 
 // Range at which target need to be for bots to start firing at it with shotgun.
 // -
-// Default: "800"
+// Default: "750"
 // Minimum: "0.000000"
-ib_targeting_range_shotgun "800"
+ib_targeting_range_shotgun "750"
 
 // Range at which target need to be for bots to start firing at it with sniper rifle.
 // -
