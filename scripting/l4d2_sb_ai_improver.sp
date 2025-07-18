@@ -832,11 +832,11 @@ void CreateAndHookConVars()
 	
 	g_hCvar_ItemScavenge_Items 						= CreateConVar("ib_grab_enabled", "16383", "Enable improved bot item scavenging for specified items.\n<0: Disabled, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defib, 32: UpgradePack, 64: Pills, 128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons. Add numbers together>", FCVAR_NOTIFY, true, 0.0, true, 16383.0);
 	g_hCvar_ItemScavenge_Models						= CreateConVar("ib_grab_models", "0", "If enabled, objects with certain models will be considered as scavengeable items.", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-	g_hCvar_ItemScavenge_ApproachRange 				= CreateConVar("ib_grab_distance", "250", "Distance at which a not visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_ApproachVisibleRange 		= CreateConVar("ib_grab_visible_distance", "500", "Distance at which a visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_ApproachRange 				= CreateConVar("ib_grab_distance", "300", "Distance at which a not visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_ApproachVisibleRange 		= CreateConVar("ib_grab_visible_distance", "600", "Distance at which a visible item should be for bot to move it.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ItemScavenge_PickupRange 				= CreateConVar("ib_grab_pickup_distance", "90", "Distance at which item should be for bot to able to pick it up.", FCVAR_NOTIFY, true, 0.0);
 	g_hCvar_ItemScavenge_MapSearchRange 			= CreateConVar("ib_grab_mapsearchdistance", "2000", "How close should the item be to the survivor bot to able to count it when searching?", FCVAR_NOTIFY, true, 0.0);
-	g_hCvar_ItemScavenge_NoHumansRangeMultiplier	= CreateConVar("ib_grab_nohumans_rangemultiplier", "2.5", "The bots' scavenge distance is multiplied to this value when there's no human players left in the team.", FCVAR_NOTIFY, true, 0.0);
+	g_hCvar_ItemScavenge_NoHumansRangeMultiplier	= CreateConVar("ib_grab_nohumans_rangemultiplier", "2.0", "The bots' scavenge distance is multiplied to this value when there's no human players left in the team.", FCVAR_NOTIFY, true, 0.0);
 
 	g_hCvar_BotWeaponPreference_Nick 				= CreateConVar("ib_pref_nick", "1", "Bot Nick's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
 	g_hCvar_BotWeaponPreference_Rochelle 			= CreateConVar("ib_pref_rochelle", "1", "Bot Rochelle's weapon preference. <0: Default, 1: Assault Rifle, 2: Shotgun, 3: Sniper Rifle, 4: SMG, 5: Secondary Weapon>", FCVAR_NOTIFY, true, 0.0, true, 5.0);
@@ -1894,10 +1894,17 @@ public void L4D2_OnStagger_Post(int iTarget, int iSource)
 	g_bInfectedBot_IsThrowing[iTarget] = false;
 }
 
-stock void VScript_DebugDrawLine(float fStartPos[3], float fEndPos[3], int iColorR = 255, int iColorG = 255, int iColorB = 255, bool bZTest = false, float fDrawTime = 1.0)
+stock void VScript_DebugDrawLine(const float fStartPos[3], const float fEndPos[3], int iColorR = 255, int iColorG = 255, int iColorB = 255, bool bZTest = false, float fDrawTime = 1.0)
 {
 	static char sScriptCode[256]; FormatEx(sScriptCode, sizeof(sScriptCode), "DebugDrawLine(Vector(%f, %f, %f), Vector(%f, %f, %f), %i, %i, %i, %s, %f)",
 		fStartPos[0], fStartPos[1], fStartPos[2], fEndPos[0], fEndPos[1], fEndPos[2], iColorR, iColorG, iColorB, (bZTest ? "true" : "false"), fDrawTime);
+	L4D2_ExecVScriptCode(sScriptCode);
+}
+
+stock void VScript_DebugDrawText(const float fOrigin[3], const char[] sText, bool bUseViewCheck = true, float fDrawTime = 1.0)
+{
+	static char sScriptCode[256]; FormatEx(sScriptCode, sizeof(sScriptCode), "DebugDrawText(Vector(%f, %f, %f), \"%s\", %s, %f)",
+		fOrigin[0], fOrigin[1], fOrigin[2], sText, (bUseViewCheck ? "true" : "false"), fDrawTime);
 	L4D2_ExecVScriptCode(sScriptCode);
 }
 
@@ -2422,7 +2429,7 @@ int SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6], int iInvFlags
 			ClearMoveToPosition(iClient);
 		}
 		else if (fCurTime > g_fBot_NextMoveCommandTime[iClient])
-		{	
+		{
 			L4D2_CommandABot(iClient, 0, BOT_CMD_MOVE, fMovePos);
 			g_fBot_NextMoveCommandTime[iClient] = fCurTime + BOT_CMD_MOVE_INTERVAL;
 		}
@@ -2994,7 +3001,7 @@ int SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6], int iInvFlags
 				fRangeMult = 1.0;
 				if (!g_bTeamHasHumanPlayer)
 					fRangeMult *= g_fCvar_ItemScavenge_NoHumansRangeMultiplier;
-				
+
 				iScavengeArea = L4D_GetNearestNavArea(fItemPos, 140.0, true, true, false);
 				iLeaderArea = g_iClientNavArea[iTeamLeader];
 				if (iScavengeArea && iLeaderArea)
@@ -3003,7 +3010,7 @@ int SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6], int iInvFlags
 					if (g_bTeamHasHumanPlayer && !LBI_IsNavAreaPartiallyVisible(iScavengeArea, g_fClientEyePos[iClient], iClient))
 						fMaxDist = g_fCvar_ItemScavenge_ApproachRange;
 
-					if (g_iBot_NearbyInfectedCount[iClient])
+					if (g_iBot_NearbyInfectedCount[iClient] > 0)
 					{
 						iHits = GetCommonHitsUntilDown(iClient, 0.66);
 						fDist = (fMaxDist / ((g_iBot_NearbyInfectedCount[iClient] + 1) / iHits));
@@ -3012,8 +3019,7 @@ int SurvivorBotThink(int iClient, int &iButtons, int iWpnSlots[6], int iInvFlags
 
 					bCanRegroup = L4D2_NavAreaBuildPath(view_as<Address>(iScavengeArea), view_as<Address>(iLeaderArea), (fMaxDist * fRangeMult), 2, false);
 					if (bCanRegroup)
-						fDistanceToRegroup = GetNavDistance(fScavengePos, g_fClientAbsOrigin[iTeamLeader], iScavengeItem, false);
-				}
+						fDistanceToRegroup = GetNavDistance(fScavengePos, g_fClientAbsOrigin[iTeamLeader], iScavengeItem, false);				}
 				else
 					bAllowScavenge = false;
 
@@ -6516,22 +6522,12 @@ bool LBI_IsNavAreaPartiallyVisible(int iNavArea, const float fEyePos[3], int iIg
 	float fFraction = TR_GetFraction(hResult); delete hResult;
 	if (fFraction == 1.0)return true;
 
-	float fEyeToCenter[3];
-	MakeVectorFromPoints(fEyePos, fCenter, fEyeToCenter);
-	NormalizeVector(fEyeToCenter, fEyeToCenter);
-
-	float fCorner[3], fEyeToCorner[3];
+	float fCorner[3];
 	for (int i = 0; i < 4; ++i)
 	{
 		LBI_GetNavAreaCorner(iNavArea, i, fCorner);
 		fCorner[2] += fOffset;
 
-		MakeVectorFromPoints(fEyePos, fCorner, fEyeToCorner);
-		NormalizeVector(fEyeToCorner, fEyeToCorner);
-		if (GetVectorDotProduct(fEyeToCorner, fEyeToCenter) >= 0.98)
-			continue;
-
-		fCorner[2] += fOffset;
 		hResult = TR_TraceRayFilterEx(fEyePos, fCorner, MASK_VISIBLE_AND_NPCS, RayType_EndPoint, CTraceFilterNoNPCsOrPlayer, iIgnoreEntity);
 		fFraction = TR_GetFraction(hResult); delete hResult;
 		if (fFraction == 1.0)return true;
@@ -6542,9 +6538,6 @@ bool LBI_IsNavAreaPartiallyVisible(int iNavArea, const float fEyePos[3], int iIg
 
 bool CTraceFilterNoNPCsOrPlayer(int iEntity, int iContentsMask, int iIgnore)
 {
-	if (iEntity == 0 || IsValidClient(iEntity))
-		return true;
-
 	static char sClassname[64]; GetEntityClassname(iEntity, sClassname, sizeof(sClassname));
 	if (strncmp(sClassname, "func_door", 9) == 0 || strncmp(sClassname, "prop_door", 9) == 0)
 		return false;
@@ -6561,7 +6554,7 @@ bool CTraceFilterNoNPCsOrPlayer(int iEntity, int iContentsMask, int iIgnore)
 	if (strcmp(sClassname, "func_playerinfected_clip") == 0)
 		return false;
 
-	return (iEntity != iIgnore);
+	return (iEntity != iIgnore && !IsValidClient(iEntity));
 }
 
 bool LBI_IsPositionInsideCheckpoint(const float fPos[3])
