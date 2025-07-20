@@ -43,7 +43,7 @@ A SourceMod plugin for Left 4 Dead 2 that tries to improve the behavior of Survi
 - **SourceMod 1.12:** https://www.sourcemod.net/downloads.php?branch=stable
 - **Left 4 DHooks Direct:** https://forums.alliedmods.net/showthread.php?t=321696
 - **Actions (Optional - Fixes bots always rushing to save their incapped friend or stopping to retreat in tank battle ):** https://forums.alliedmods.net/showpost.php?p=2771520&postcount=1
-- [**VScript by FortyTwoFortyTwo**](https://github.com/FortyTwoFortyTwo/VScript) (Optional, has it's own requirements. **Seems to cause crashes on map load when playing with [Left 4 Bots 2](https://steamcommunity.com/sharedfiles/filedetails/?id=3022416274) installed**)
+- [**VScript by FortyTwoFortyTwo**](https://github.com/FortyTwoFortyTwo/VScript) (Optional, has it's own requirements. **Seems to cause crashes on map load when playing with [Left 4 Bots 2](https://steamcommunity.com/sharedfiles/filedetails/?id=3022416274) or various VScript addon installed**)
 
 ---
 
@@ -183,9 +183,9 @@ ib_evade_spit "1"
 
 // Distance at which a not visible item should be for bot to move it.
 // -
-// Default: "250"
+// Default: "300"
 // Minimum: "0.000000"
-ib_grab_distance "250"
+ib_grab_distance "300"
 
 // Enable improved bot item scavenging for specified items.
 // <0: Disabled, 1: Pipe Bomb, 2: Molotov, 4: Bile Bomb, 8: Medkit, 16: Defib, 32: UpgradePack, 64: Pills, 128: Adrenaline, 256: Laser Sights, 512: Ammopack, 1024: Ammopile, 2048: Chainsaw, 4096: Secondary Weapons, 8192: Primary Weapons. Add numbers together>
@@ -210,9 +210,9 @@ ib_grab_models "0"
 
 // The bots' scavenge distance is multiplied to this value when there's no human players left in the team.
 // -
-// Default: "2.5"
+// Default: "2.0"
 // Minimum: "0.000000"
-ib_grab_nohumans_rangemultiplier "2.5"
+ib_grab_nohumans_rangemultiplier "2.0"
 
 // Distance at which item should be for bot to able to pick it up.
 // -
@@ -222,9 +222,9 @@ ib_grab_pickup_distance "90"
 
 // Distance at which a visible item should be for bot to move it.
 // -
-// Default: "500"
+// Default: "600"
 // Minimum: "0.000000"
-ib_grab_visible_distance "500"
+ib_grab_visible_distance "600"
 
 // Enables survivor bots throwing grenades.
 // -
@@ -263,7 +263,7 @@ ib_gren_throw_range "1500"
 // Maximum: "7.000000"
 ib_gren_types "7"
 
-// If the survivor bot's primary ammo percentage is above this value, they'll consider that they have enough ammo before replacement
+// If the survivor bot's primary ammo percentage is below this value, they'll consider replacing the current primary with the new one
 // -
 // Default: "0.33"
 // Minimum: "0.000000"
@@ -352,10 +352,10 @@ ib_melee_switch_range "200"
 
 // Makes survivor bots change their grenade type if there's too much of the same one, Ex. Pipe-Bomb to Molotov.
 // -
-// Default: "0"
+// Default: "1"
 // Minimum: "0.000000"
 // Maximum: "1.000000"
-ib_mix_grenades "0"
+ib_mix_grenades "1"
 
 // If enabled, bots will try to not have a whole team consist of only SMGs or shotguns and pick up different ones if too much.
 // -
@@ -545,17 +545,17 @@ ib_targeting_range_sniperrifle "2500"
 
 // The field of view of survivor bots.
 // -
-// Default: "75.0"
+// Default: "70.0"
 // Minimum: "0.000000"
 // Maximum: "180.000000"
-ib_vision_fov "75.0"
+ib_vision_fov "70.0"
 
 // The time required for bots to notice enemy target is multiplied to this value.
 // -
-// Default: "1.1"
+// Default: "1.0"
 // Minimum: "0.000000"
 // Maximum: "4.000000"
-ib_vision_noticetimescale "1.1"
+ib_vision_noticetimescale "1.0"
 
 // (WIP) Allows survivor bots to crown witch on their path if they're holding any shotgun type weapon. <0: Disabled; 1: Only if survivor team doesn't have any human players; 2:Enabled>
 // -

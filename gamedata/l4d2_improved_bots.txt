@@ -40,6 +40,11 @@
 				"linux"		"32"
 			}
 
+			"CBaseCombatWeapon::PrimaryAttack"
+			{
+				"windows"	"282"
+				"linux"		"283"
+			}
 			"CBaseCombatWeapon::GetMaxClip1"
 			{
 				"windows"	"323"
